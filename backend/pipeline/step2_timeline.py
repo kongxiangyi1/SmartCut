@@ -206,6 +206,12 @@ class TimelineExtractor:
             except Exception as e:
                 logger.error(f"对最终结果排序时出错: {e}。返回未排序的结果。")
 
+        # 5. 修复重叠时间
+        if all_timeline_data:
+            logger.info("开始修复重叠时间...")
+            all_timeline_data = self._fix_overlapping_times(all_timeline_data)
+            logger.info("重叠时间修复完成。")
+
         return all_timeline_data
         
     def _parse_and_validate_response(self, response: str, chunk_start: str, chunk_end: str, chunk_index: int) -> List[Dict]:
@@ -315,6 +321,82 @@ class TimelineExtractor:
             logger.info(f"调试响应已保存到: {debug_file}")
         except Exception as e:
             logger.error(f"保存调试响应失败: {e}")
+
+    def _fix_overlapping_times(self, timeline_data: List[Dict]) -> List[Dict]:
+        """
+        修复重叠时间并过滤不满足最小时长要求的话题。
+        规则：
+        1. 跳过开始时间>=结束时间的无效话题
+        2. 话题内容（不含产品相关关键词）时长<90秒的跳过
+        3. 产品讲解类话题时长<30秒的跳过
+        4. 重叠的时间区间进行修正
+        """
+        if not timeline_data:
+            return []
+
+        logger.info(f"开始处理 {len(timeline_data)} 个话题的时间区间...")
+        fixed_data = []
+
+        for timeline_item in timeline_data:
+            start_time = timeline_item.get('start_time', '')
+            end_time = timeline_item.get('end_time', '')
+
+            if not start_time or not end_time:
+                logger.warning(f"  > 话题 '{timeline_item.get('outline', '未知')}' 缺少时间信息，跳过")
+                continue
+
+            start_sec = self.text_processor.time_to_seconds(start_time)
+            end_sec = self.text_processor.time_to_seconds(end_time)
+
+            if start_sec >= end_sec:
+                logger.warning(f"  > 话题 '{timeline_item['outline']}' 的开始时间({start_time})大于或等于结束时间({end_time})，跳过该话题")
+                continue
+
+            duration_sec = end_sec - start_sec
+            outline_lower = timeline_item.get('outline', '').lower()
+
+            if '产品' in outline_lower or '销售' in outline_lower or '介绍' in outline_lower or '优惠' in outline_lower:
+                if duration_sec < 30:
+                    logger.warning(f"  > 产品讲解类话题 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于30秒，跳过该话题")
+                    continue
+            else:
+                if duration_sec < 90:
+                    logger.warning(f"  > 话题类内容 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于90秒，跳过该话题")
+                    continue
+
+            fixed_data.append(timeline_item)
+
+        if not fixed_data:
+            logger.warning("所有话题均被过滤，无有效时间区间")
+            return []
+
+        for i in range(len(fixed_data) - 1):
+            current = fixed_data[i]
+            next_item = fixed_data[i + 1]
+
+            current_end_sec = self.text_processor.time_to_seconds(current['end_time'])
+            next_start_sec = self.text_processor.time_to_seconds(next_item['start_time'])
+
+            if next_start_sec < current_end_sec:
+                overlap_sec = current_end_sec - next_start_sec
+                logger.warning(f"  > 发现重叠: '{current['outline']}' 和 '{next_item['outline']}' 重叠 {overlap_sec:.1f}秒")
+
+                mid_point = (current_end_sec + next_start_sec) / 2
+                current_hms = self._seconds_to_time(mid_point - 0.1)
+                next_item['start_time'] = self._seconds_to_time(mid_point + 0.1)
+                current['end_time'] = current_hms
+                logger.warning(f"  > 已修正: '{current['outline']}' 结束时间调整为 {current['end_time']}")
+                logger.warning(f"  > 已修正: '{next_item['outline']}' 开始时间调整为 {next_item['start_time']}")
+
+        logger.info(f"时间区间处理完成，{len(fixed_data)}/{len(timeline_data)} 个话题有效")
+        return fixed_data
+
+    def _seconds_to_time(self, seconds: float) -> str:
+        """将秒数转换为 HH:MM:SS,mmm 格式"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace('.', ',')
 
     def save_timeline(self, timeline_data: List[Dict], output_path: Optional[Path] = None) -> Path:
         """

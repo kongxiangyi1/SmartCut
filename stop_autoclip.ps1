@@ -70,15 +70,15 @@ Stop-ProcessByFile -PidFile $CELERY_PID_FILE -ServiceName "Celery Worker"
 Stop-ProcessByFile -PidFile $FRONTEND_PID_FILE -ServiceName "Frontend"
 Stop-ProcessByFile -PidFile $BACKEND_PID_FILE -ServiceName "Backend"
 
-$remainingPorts = @(8000, 3000)
+$remainingPorts = @(8001, 3000)
 foreach ($port in $remainingPorts) {
     $proc = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty OwningProcess -Unique
     if ($proc) {
-        foreach ($pid in $proc) {
-            $processName = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
-            Write-Log "Found process using port ${port} (PID: $pid, Name: $processName), stopping..." "WARNING"
-            Stop-Process -Id $pid -Force -Confirm:$false -ErrorAction SilentlyContinue
+        foreach ($processId in $proc) {
+            $processName = (Get-Process -Id $processId -ErrorAction SilentlyContinue).ProcessName
+            Write-Log "Found process using port ${port} (PID: $processId, Name: $processName), stopping..." "WARNING"
+            Stop-Process -Id $processId -Force -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
 }

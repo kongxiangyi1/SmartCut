@@ -1,9 +1,8 @@
 #!/usr/bin/env pwsh
 
 param(
-    [int]$BackendPort = 8000,
+    [int]$BackendPort = 8001,
     [int]$FrontendPort = 3000,
-    [int]$MaxPortTry = 10,
     [switch]$SkipStop,
     [switch]$SkipRedis,
     [switch]$Help
@@ -15,9 +14,8 @@ if ($Help) {
     Write-Host "Usage: .\start_autoclip.ps1 [options]"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -BackendPort <port>   Backend port (default: 8000)"
+    Write-Host "  -BackendPort <port>   Backend port (fixed: 8001)"
     Write-Host "  -FrontendPort <port>  Frontend port (default: 3000)"
-    Write-Host "  -MaxPortTry <count>   Max port search attempts (default: 10)"
     Write-Host "  -SkipStop             Skip stopping old services"
     Write-Host "  -SkipRedis            Skip Redis check"
     Write-Host "  -Help                 Show this help"
@@ -295,25 +293,15 @@ Write-Log "========== Port Detection ==========" "INFO"
 
 $actualBackendPort = $BackendPort
 if (-not (Test-PortAvailable -Port $BackendPort)) {
-    Write-Log "Port $BackendPort is in use, searching for available port..." "WARNING"
-    $actualBackendPort = Get-NextAvailablePort -StartPort ($BackendPort + 1) -MaxTry $MaxPortTry
-    if (-not $actualBackendPort) {
-        Write-Log "Cannot find available port" "ERROR"
-        exit 1
-    }
-    Kill-ProcessByPort -Port $actualBackendPort
+    Write-Log "Port $BackendPort is in use, killing the process..." "WARNING"
+    Kill-ProcessByPort -Port $BackendPort
 }
 Write-Log "Backend port: $actualBackendPort" "SUCCESS"
 
 $actualFrontendPort = $FrontendPort
 if (-not (Test-PortAvailable -Port $FrontendPort)) {
-    Write-Log "Port $FrontendPort is in use, searching for available port..." "WARNING"
-    $actualFrontendPort = Get-NextAvailablePort -StartPort ($FrontendPort + 1) -MaxTry $MaxPortTry
-    if (-not $actualFrontendPort) {
-        Write-Log "Cannot find available port" "ERROR"
-        exit 1
-    }
-    Kill-ProcessByPort -Port $actualFrontendPort
+    Write-Log "Port $FrontendPort is in use, killing the process..." "WARNING"
+    Kill-ProcessByPort -Port $FrontendPort
 }
 Write-Log "Frontend port: $actualFrontendPort" "SUCCESS"
 
