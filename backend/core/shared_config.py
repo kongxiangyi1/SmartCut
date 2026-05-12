@@ -121,6 +121,15 @@ TARGET_TOPIC_DURATION_MINUTES = 5  # 话题目标时长（分钟）
 MIN_TOPICS_PER_CHUNK = 3  # 每个文本块最少话题数
 MAX_TOPICS_PER_CHUNK = 8  # 每个文本块最多话题数
 
+# 滑动窗口配置
+SLIDING_WINDOW = {
+    "enabled": True,
+    "chunk_size": 300,           # 分块大小（秒）
+    "overlap_minutes": 1,         # 重叠时长（分钟）
+    "min_topic_duration": 90,     # 话题最小时长（秒）
+    "anchor_window_size": 30,     # 锚点检测窗口（秒）
+}
+
 # 确保输出目录存在
 for dir_path in [CLIPS_DIR, COLLECTIONS_DIR, METADATA_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)

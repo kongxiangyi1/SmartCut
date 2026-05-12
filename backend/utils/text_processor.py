@@ -27,14 +27,15 @@ class TextProcessor:
     """文本处理工具类"""
     
     @staticmethod
-    def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
+    def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap_minutes: int = 0) -> List[str]:
         """
-        将长文本按指定大小分块
-        
+        将长文本按指定大小分块（支持滑动窗口重叠）
+
         Args:
             text: 输入文本
-            chunk_size: 分块大小
-            
+            chunk_size: 分块大小（字符数）
+            overlap_minutes: 重叠时长（分钟），用于边界话题处理
+
         Returns:
             文本块列表
         """

@@ -168,16 +168,93 @@ class OutlineExtractor:
         
         return outlines
     
-    def _merge_outlines(self, outlines: List[Dict]) -> List[Dict]:
+    def _merge_outlines(self, outlines: List[Dict], overlap_threshold: float = 0.6) -> List[Dict]:
         """
-        合并和去重大纲，保留最先出现的版本
+        合并和去重大纲，支持跨窗口去重
+
+        Args:
+            outlines: 所有大纲列表
+            overlap_threshold: 时间重叠阈值，超过则认为重复
+
+        Returns:
+            去重后的大纲列表
         """
-        unique_outlines = {}
+        if not outlines:
+            return []
+
         for outline in outlines:
-            title = outline['title']
-            if title not in unique_outlines:
-                unique_outlines[title] = outline
-        return list(unique_outlines.values())
+            outline['start_seconds'] = self._time_to_seconds(outline.get('start_time', '0'))
+            outline['end_seconds'] = self._time_to_seconds(outline.get('end_time', '0'))
+
+        outlines.sort(key=lambda x: x['start_seconds'])
+
+        unique_outlines = []
+        for outline in outlines:
+            is_duplicate = False
+            for existing in unique_outlines:
+                if self._outlines_are_similar(outline, existing, overlap_threshold):
+                    if outline.get('coverage', 0) > existing.get('coverage', 0):
+                        unique_outlines.remove(existing)
+                        unique_outlines.append(outline)
+                        logger.debug(f"替换重复大纲: {existing['title']} -> {outline['title']}")
+                    else:
+                        logger.debug(f"跳过重复大纲: {outline['title']}")
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                unique_outlines.append(outline)
+
+        for outline in unique_outlines:
+            outline.pop('start_seconds', None)
+            outline.pop('end_seconds', None)
+
+        return unique_outlines
+
+    def _outlines_are_similar(
+        self,
+        outline1: Dict,
+        outline2: Dict,
+        threshold: float = 0.6
+    ) -> bool:
+        title1 = outline1.get('title', '').lower()
+        title2 = outline2.get('title', '').lower()
+
+        if title1 == title2:
+            return True
+
+        from difflib import SequenceMatcher
+        similarity = SequenceMatcher(None, title1, title2).ratio()
+        if similarity >= threshold:
+            return True
+
+        start1 = outline1.get('start_seconds', 0)
+        end1 = outline1.get('end_seconds', 0)
+        start2 = outline2.get('start_seconds', 0)
+        end2 = outline2.get('end_seconds', 0)
+
+        overlap_start = max(start1, start2)
+        overlap_end = min(end1, end2)
+        overlap = max(0, overlap_end - overlap_start)
+
+        shorter_duration = min(end1 - start1, end2 - start2) if (end1 > start1 and end2 > start2) else 0
+        if shorter_duration > 0:
+            overlap_ratio = overlap / shorter_duration
+            if overlap_ratio >= 0.5:
+                return True
+
+        return False
+
+    @staticmethod
+    def _time_to_seconds(time_str: str) -> float:
+        time_str = time_str.replace(',', '.')
+        parts = time_str.split(':')
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        elif len(parts) == 2:
+            minutes, seconds = parts
+            return float(minutes) * 60 + float(seconds)
+        return 0.0
     
     def save_outline(self, outlines: List[Dict], output_path: Optional[Path] = None) -> Path:
         """
