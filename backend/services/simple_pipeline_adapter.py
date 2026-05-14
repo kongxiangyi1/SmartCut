@@ -26,81 +26,94 @@ class SimplePipelineAdapter:
         
     async def _generate_subtitle_automatically(self, video_path: str, metadata_dir: Path) -> Path:
         """
-        自动生成字幕文件
-        
+        自动生成字幕文件 - 优化版本
+
+        降级策略（按准确度和内存综合排序）：
+        1. FunASR Paraformer-zh（推荐，最准确、内存最低 ~1GB）
+        2. Whisper Small（多语言、内存适中 ~3GB）
+        3. bcut-asr（快速备用）
+        4. 返回 None（使用空大纲）
+
         Args:
             video_path: 视频文件路径
             metadata_dir: 元数据目录
-            
+
         Returns:
             生成的SRT文件路径，如果失败返回None
         """
+        from backend.utils.speech_recognizer import generate_subtitle_for_video
+
+        video_file_path = Path(video_path)
+        if not video_file_path.exists():
+            logger.error(f"视频文件不存在: {video_path}")
+            return None
+
+        output_path = metadata_dir / f"{video_file_path.stem}.srt"
+
+        logger.info(f"开始为视频 {video_path} 自动生成字幕")
+        logger.info(f"降级策略: FunASR → Whisper Small → bcut-asr → 空字幕")
+
+        # 更新进度
+        emit_progress(self.project_id, "SUBTITLE", "正在使用AI生成字幕...", subpercent=10)
+
+        # 方案1: FunASR Paraformer-zh（最推荐）
         try:
-            logger.info(f"开始为视频 {video_path} 自动生成字幕")
-            
-            # 更新进度
-            from backend.services.simple_progress import emit_progress
-            emit_progress(self.project_id, "SUBTITLE", "正在使用AI生成字幕...", subpercent=25)
-            
-            # 尝试使用bcut-asr
-            try:
-                from backend.utils.speech_recognizer import generate_subtitle_for_video
-                from pathlib import Path
-                
-                video_file_path = Path(video_path)
-                if not video_file_path.exists():
-                    logger.error(f"视频文件不存在: {video_path}")
-                    return None
-                
-                # 使用bcut-asr生成字幕
-                logger.info("尝试使用bcut-asr生成字幕")
-                output_path = metadata_dir / f"{video_file_path.stem}.srt"
-                srt_path = generate_subtitle_for_video(
-                    video_file_path,
-                    output_path=output_path,
-                    method="auto",
-                    model="base",
-                    language="auto"
-                )
-                
-                if srt_path and srt_path.exists():
-                    logger.info(f"bcut-asr生成字幕成功: {srt_path}")
-                    emit_progress(self.project_id, "SUBTITLE", "AI字幕生成完成", subpercent=40)
-                    return srt_path
-                else:
-                    logger.warning("bcut-asr生成字幕失败")
-                    
-            except Exception as e:
-                logger.warning(f"bcut-asr生成字幕失败: {e}")
-            
-            # 如果bcut-asr失败，尝试使用Whisper本地模型
-            try:
-                logger.info("尝试使用Whisper本地模型生成字幕")
-                output_path = metadata_dir / f"{Path(video_path).stem}.srt"
-                srt_path = generate_subtitle_for_video(
-                    Path(video_path),
-                    output_path=output_path,
-                    method="whisper_local",
-                    model="base",
-                    language="auto"
-                )
-                
-                if srt_path and srt_path.exists():
-                    logger.info(f"Whisper生成字幕成功: {srt_path}")
-                    emit_progress(self.project_id, "SUBTITLE", "AI字幕生成完成", subpercent=40)
-                    return srt_path
-                else:
-                    logger.warning("Whisper生成字幕失败")
-                    
-            except Exception as e:
-                logger.warning(f"Whisper生成字幕失败: {e}")
-            
-            logger.error("所有ASR方法都失败了")
-            return None
-            
+            logger.info("尝试使用 FunASR (Paraformer-zh) 生成字幕...")
+            emit_progress(self.project_id, "SUBTITLE", "正在使用FunASR生成字幕...", subpercent=15)
+            srt_path = generate_subtitle_for_video(
+                video_file_path,
+                output_path=output_path,
+                method="funasr",
+                model="paraformer-zh",
+                language="zh"
+            )
+            if srt_path and srt_path.exists():
+                logger.info(f"✅ FunASR 字幕生成成功: {srt_path}")
+                emit_progress(self.project_id, "SUBTITLE", "FunASR字幕生成完成", subpercent=40)
+                return srt_path
         except Exception as e:
-            logger.error(f"自动生成字幕过程中发生错误: {e}")
-            return None
+            logger.warning(f"⚠️ FunASR 生成失败: {e}")
+
+        # 方案2: Whisper Small（内存友好）
+        try:
+            logger.info("尝试使用 Whisper Small 生成字幕...")
+            emit_progress(self.project_id, "SUBTITLE", "正在使用Whisper生成字幕...", subpercent=20)
+            srt_path = generate_subtitle_for_video(
+                video_file_path,
+                output_path=output_path,
+                method="whisper_local",
+                model="small",
+                language="auto"
+            )
+            if srt_path and srt_path.exists():
+                logger.info(f"✅ Whisper Small 字幕生成成功: {srt_path}")
+                emit_progress(self.project_id, "SUBTITLE", "Whisper字幕生成完成", subpercent=40)
+                return srt_path
+        except Exception as e:
+            logger.warning(f"⚠️ Whisper Small 生成失败: {e}")
+
+        # 方案3: bcut-asr（备用快速方案）
+        try:
+            logger.info("尝试使用 bcut-asr 生成字幕...")
+            emit_progress(self.project_id, "SUBTITLE", "正在使用bcut-asr生成字幕...", subpercent=25)
+            srt_path = generate_subtitle_for_video(
+                video_file_path,
+                output_path=output_path,
+                method="bcut_asr",
+                model="base",
+                language="auto"
+            )
+            if srt_path and srt_path.exists():
+                logger.info(f"✅ bcut-asr 字幕生成成功: {srt_path}")
+                emit_progress(self.project_id, "SUBTITLE", "bcut-asr字幕生成完成", subpercent=40)
+                return srt_path
+        except Exception as e:
+            logger.warning(f"⚠️ bcut-asr 生成失败: {e}")
+
+        # 全部失败
+        logger.error("❌ 所有字幕生成方案均失败，将使用空字幕")
+        emit_progress(self.project_id, "SUBTITLE", "字幕生成失败，使用空字幕", subpercent=40)
+        return None
         
     async def process_project_sync(self, input_video_path: str, input_srt_path: str) -> Dict[str, Any]:
         """

@@ -356,12 +356,12 @@ class TimelineExtractor:
             outline_lower = timeline_item.get('outline', '').lower()
 
             if '产品' in outline_lower or '销售' in outline_lower or '介绍' in outline_lower or '优惠' in outline_lower:
-                if duration_sec < 30:
-                    logger.warning(f"  > 产品讲解类话题 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于30秒，跳过该话题")
+                if duration_sec < 15:
+                    logger.warning(f"  > 产品讲解类话题 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于15秒，跳过该话题")
                     continue
             else:
-                if duration_sec < 90:
-                    logger.warning(f"  > 话题类内容 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于90秒，跳过该话题")
+                if duration_sec < 30:
+                    logger.warning(f"  > 话题类内容 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于30秒，跳过该话题")
                     continue
 
             fixed_data.append(timeline_item)

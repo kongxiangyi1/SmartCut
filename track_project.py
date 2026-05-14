@@ -84,8 +84,8 @@ async def track_project_execution(project_id: str):
             logger.info(f"📋 任务记录已创建: {task.id}")
             
             # 创建Pipeline适配器
-            from backend.services.pipeline_adapter import create_pipeline_adapter_sync
-            pipeline_adapter = create_pipeline_adapter_sync(db, str(task.id), project_id)
+            from backend.services.pipeline_adapter import create_pipeline_adapter
+            pipeline_adapter = create_pipeline_adapter(db, str(task.id), project_id)
             
             # 验证流水线前置条件
             logger.info("🔍 验证流水线前置条件...")
@@ -101,8 +101,7 @@ async def track_project_execution(project_id: str):
             logger.info("\n🎬 开始执行完整流水线...")
             logger.info("-" * 40)
             
-            result = pipeline_adapter.process_project_sync(
-                project_id=project_id,
+            result = await pipeline_adapter.process_project(
                 input_video_path=str(input_video_path),
                 input_srt_path=str(input_srt_path)
             )
@@ -174,8 +173,8 @@ async def track_project_execution(project_id: str):
 
 async def main():
     """主函数"""
-    # 新上传的项目ID
-    project_id = "8fe43749-245d-4702-8a57-775496f145a1"
+    # 使用数据库中存在的项目ID
+    project_id = "6b07a94f-c454-4cc0-901c-4704e2d1f07e"
     
     print(f"🎯 目标项目: {project_id}")
     print(f"⏳ 开始执行...\n")

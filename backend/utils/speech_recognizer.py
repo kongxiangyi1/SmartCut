@@ -15,8 +15,42 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# FunASR模型缓存
-_FUNASR_MODEL_CACHE = None
+# FunASR模型缓存（按设备类型缓存）
+_FUNASR_MODEL_CACHE = {}
+
+def _detect_compute_device() -> str:
+    """
+    自动检测可用的计算设备
+    
+    优先级:
+    1. 环境变量 SPEECH_DEVICE
+    2. CUDA (NVIDIA GPU)
+    3. MPS (Apple Silicon GPU)
+    4. CPU
+    
+    Returns:
+        设备类型字符串: "cuda", "mps", 或 "cpu"
+    """
+    # 检查环境变量手动指定
+    env_device = os.environ.get("SPEECH_DEVICE", "").lower()
+    if env_device in ["cuda", "mps", "cpu"]:
+        logger.info(f"使用环境变量指定的设备: {env_device}")
+        return env_device
+    
+    # 检查CUDA
+    try:
+        import torch
+        if torch.cuda.is_available():
+            logger.info("检测到CUDA设备，使用GPU加速")
+            return "cuda"
+        elif torch.backends.mps.is_available():
+            logger.info("检测到MPS设备，使用Apple Silicon GPU")
+            return "mps"
+    except ImportError:
+        logger.debug("PyTorch未安装，无法检测GPU")
+    
+    logger.info("未检测到可用GPU，使用CPU")
+    return "cpu"
 
 # 尝试导入bcut-asr
 try:
@@ -168,18 +202,32 @@ class SpeechRecognitionConfig:
                 self.method = SpeechRecognitionMethod(self.method)
             except ValueError:
                 raise ValueError(f"不支持的语音识别方法: {self.method}")
-        
+
         # 验证语言
         if not isinstance(self.language, LanguageCode):
             try:
                 self.language = LanguageCode(self.language)
             except ValueError:
                 raise ValueError(f"不支持的语言代码: {self.language}")
-        
-        # 验证模型
-        valid_models = ["tiny", "base", "small", "medium", "large"]
-        if self.model not in valid_models:
-            raise ValueError(f"不支持的Whisper模型: {self.model}")
+
+        # 自动调整模型（当 model 为默认值 "base" 时，根据方法选择正确的默认模型）
+        if self.model == "base":
+            if self.method == SpeechRecognitionMethod.FUNASR:
+                self.model = "paraformer-zh"
+            elif self.method == SpeechRecognitionMethod.WHISPER_LOCAL:
+                self.model = "small"
+            # 其他方法使用默认的 "base"（bcut-asr 等不需要 model 参数）
+
+        # 验证模型（根据不同方法使用不同的验证规则）
+        if self.method == SpeechRecognitionMethod.WHISPER_LOCAL:
+            valid_models = ["tiny", "base", "small", "medium", "large"]
+            if self.model not in valid_models:
+                raise ValueError(f"不支持的Whisper模型: {self.model}")
+        elif self.method == SpeechRecognitionMethod.FUNASR:
+            valid_models = ["paraformer-zh", "paraformer-en", "paraformer-zh-16k", "euro", "fa", "ms", "asr", "ct-punc", "fsmn-vad"]
+            if self.model not in valid_models:
+                raise ValueError(f"不支持的FunASR模型: {self.model}")
+        # bcut-asr 和其他云服务不需要验证 model 参数
         
         # 验证超时时间
         if self.timeout < 0:
@@ -627,7 +675,7 @@ class SpeechRecognizer:
     
     def _generate_subtitle_funasr(self, video_path: Path, output_path: Path,
                                    config: SpeechRecognitionConfig) -> Path:
-        """使用FunASR生成字幕"""
+        """使用FunASR生成字幕（支持GPU加速和模型量化）"""
         if not self.available_methods[SpeechRecognitionMethod.FUNASR]:
             raise SpeechRecognitionError(
                 "FunASR不可用，请安装: pip install funasr"
@@ -645,25 +693,46 @@ class SpeechRecognizer:
 
             audio_path = self._extract_audio_from_video(video_path, output_path.parent)
 
+            # 自动检测计算设备
+            device = _detect_compute_device()
+            logger.info(f"使用计算设备: {device}")
+
             logger.info(f"加载FunASR模型...")
             from funasr import AutoModel
             global _FUNASR_MODEL_CACHE
             
-            # 使用缓存的模型，避免重复加载
-            if _FUNASR_MODEL_CACHE is None:
-                logger.info("初始化FunASR模型（首次加载）...")
-                _FUNASR_MODEL_CACHE = AutoModel(
-                    model="paraformer-zh",
-                    vad_model="fsmn-vad",
-                    punc_model="ct-punc",
-                    device="cpu",
-                    disable_update=True  # 禁用更新检查
-                )
+            # 检查是否启用量化（通过环境变量控制）
+            use_quantize = os.environ.get("FUNASR_QUANTIZE", "true").lower() == "true"
+            
+            # 使用缓存的模型（按设备类型缓存）
+            cache_key = f"{device}_{'quantized' if use_quantize else 'full'}"
+            
+            if cache_key not in _FUNASR_MODEL_CACHE:
+                logger.info(f"初始化FunASR模型（首次加载，{cache_key}）...")
+                
+                model_kwargs = {
+                    "model": "paraformer-zh",
+                    "vad_model": "fsmn-vad",
+                    "punc_model": "ct-punc",
+                    "device": device,
+                    "disable_update": True,  # 禁用更新检查
+                    "cache_dir": str(Path.home() / ".cache" / "funasr"),
+                }
+                
+                # 启用模型量化（减少内存占用，提升推理速度）
+                if use_quantize:
+                    model_kwargs.update({
+                        "quantize": True,
+                        "int8": True,
+                    })
+                    logger.info("启用模型量化(INT8)")
+                
+                _FUNASR_MODEL_CACHE[cache_key] = AutoModel(**model_kwargs)
                 logger.info("FunASR模型加载完成")
             else:
-                logger.info("使用缓存的FunASR模型")
+                logger.info(f"使用缓存的FunASR模型 ({cache_key})")
             
-            model = _FUNASR_MODEL_CACHE
+            model = _FUNASR_MODEL_CACHE[cache_key]
 
             logger.info("开始FunASR转录...")
             # 设置return_timestamp=True以获取带时间戳的分段结果
@@ -867,34 +936,48 @@ class SpeechRecognizer:
         return ["tiny", "base", "small", "medium", "large"]
 
 
-def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = None, 
-                               method: str = "auto", language: str = "auto", 
+def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = None,
+                               method: str = "auto", language: str = "auto",
                                model: str = "base", enable_fallback: bool = True) -> Path:
     """
     为视频生成字幕文件的便捷函数
-    
+
     Args:
         video_path: 视频文件路径
         output_path: 输出字幕文件路径
-        method: 生成方法 ("auto", "bcut_asr", "whisper_local", "openai_api", "azure_speech", "google_speech", "aliyun_speech")
+        method: 生成方法 ("auto", "funasr", "bcut_asr", "whisper_local", "openai_api", "azure_speech", "google_speech", "aliyun_speech")
         language: 语言代码
-        model: Whisper模型大小（仅对whisper_local有效）
+        model: 模型名称（FunASR用paraformer-zh，Whisper用small等）
         enable_fallback: 是否启用回退机制
-        
+
     Returns:
         生成的字幕文件路径
-        
+
     Raises:
         SpeechRecognitionError: 语音识别失败
     """
+    if method == "auto":
+        effective_method = SpeechRecognitionMethod.FUNASR
+    else:
+        effective_method = SpeechRecognitionMethod(method)
+
+    if effective_method == SpeechRecognitionMethod.FUNASR:
+        default_model = "paraformer-zh"
+    elif effective_method == SpeechRecognitionMethod.WHISPER_LOCAL:
+        default_model = "small"
+    else:
+        default_model = model
+
+    final_model = model if model != "base" else default_model
+
     # 创建配置
     config = SpeechRecognitionConfig(
-        method=SpeechRecognitionMethod(method) if method != "auto" else SpeechRecognitionMethod.BCUT_ASR,
+        method=effective_method,
         language=LanguageCode(language),
-        model=model,
+        model=final_model,
         enable_fallback=enable_fallback
     )
-    
+
     recognizer = SpeechRecognizer()
     
     if method == "auto":

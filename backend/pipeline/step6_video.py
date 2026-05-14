@@ -70,11 +70,50 @@ class VideoGenerator:
                 'end_time': clip['end_time']
             })
         
-        # 批量生成切片
-        successful_clips = self.video_processor.batch_extract_clips(input_video, clips_data)
+        # 批量生成切片（使用并行处理提升速度）
+        # 注意：batch_extract_clips_parallel 会修改 clips_data 中的时间（静音处理在并行前完成）
+        # 不指定 max_workers，让系统自动根据服务器配置（CPU、内存、磁盘类型）计算最优线程数
+        successful_clips = self.video_processor.batch_extract_clips_parallel(
+            input_video, clips_data
+        )
+        
+        # 将静音处理后的时间同步回 clips_with_titles，确保元数据与实际视频一致
+        for clip_data in clips_data:
+            for clip in clips_with_titles:
+                # 使用 str() 统一类型比较，避免整数和字符串比较失败
+                if str(clip['id']) == str(clip_data['id']):
+                    # 同步静音处理后的时间
+                    if 'start_time' in clip_data:
+                        clip['start_time'] = clip_data['start_time']
+                    if 'end_time' in clip_data:
+                        clip['end_time'] = clip_data['end_time']
+                    # 优先使用从视频获取的实际时长（静音处理后的），否则用时间差计算
+                    if clip_data.get('duration', 0) > 0:
+                        clip['duration'] = clip_data['duration']
+                    else:
+                        start_sec = self._time_to_seconds(clip['start_time'])
+                        end_sec = self._time_to_seconds(clip['end_time'])
+                        clip['duration'] = end_sec - start_sec
+                    break
         
         logger.info(f"切片视频生成完成，共{len(successful_clips)}个切片")
         return successful_clips
+    
+    def _time_to_seconds(self, time_str: str) -> float:
+        """将时间字符串转换为秒数"""
+        try:
+            time_str = time_str.replace(',', '.')
+            if '.' in time_str:
+                time_part, ms_part = time_str.split('.')
+                milliseconds = int(ms_part)
+            else:
+                time_part = time_str
+                milliseconds = 0
+            
+            h, m, s = map(int, time_part.split(':'))
+            return h * 3600 + m * 60 + s + milliseconds / 1000
+        except Exception:
+            return 0.0
     
     def _generate_smart_clips(self, clips_with_titles: List[Dict], input_video: Path, srt_path: Path) -> List[Path]:
         """

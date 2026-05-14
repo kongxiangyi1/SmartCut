@@ -317,7 +317,7 @@ const ClipCard: React.FC<ClipCardProps> = ({
                   gap: '4px'
                 }}
               >
-                {formatDuration(calculateDuration(clip.start_time, clip.end_time))}
+                {formatDuration(clip.duration)}
               </div>
             </div>
           }

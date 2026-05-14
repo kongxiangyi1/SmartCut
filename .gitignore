@@ -109,3 +109,9 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
+
+# Large files
+*.7z
+offline_packages/
+*.pt
+dump.rdb

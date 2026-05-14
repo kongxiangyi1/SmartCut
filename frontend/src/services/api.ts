@@ -227,12 +227,14 @@ export const projectApi = {
 
       // 转换后端数据格式为前端期望的格式
       const convertedClips = clips.map((clip: any) => {
-        // 转换秒数为时间字符串格式
+        // 转换秒数为时间字符串格式，保留毫秒
         const formatSecondsToTime = (seconds: number) => {
           const hours = Math.floor(seconds / 3600)
           const minutes = Math.floor((seconds % 3600) / 60)
-          const secs = Math.floor(seconds % 60)
-          return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+          const totalSeconds = seconds % 60
+          const secs = Math.floor(totalSeconds)
+          const milliseconds = Math.floor((totalSeconds - secs) * 1000)
+          return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`
         }
 
         // 获取metadata中的内容

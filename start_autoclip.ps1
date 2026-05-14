@@ -312,6 +312,7 @@ Save-Config -Config @{
 }
 
 $env:PYTHONPATH = $PROJECT_ROOT
+$env:USE_SIMPLE_TASK_RUNNER = "true"
 
 Write-Host ""
 Write-Log "========== Starting Backend ==========" "INFO"

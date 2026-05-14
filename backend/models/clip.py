@@ -41,21 +41,21 @@ class Clip(BaseModel):
         comment="切片状态"
     )
     
-    # 时间信息
+    # 时间信息（使用Float保留毫秒精度）
     start_time = Column(
-        Integer, 
+        Float, 
         nullable=False, 
-        comment="开始时间（秒）"
+        comment="开始时间（秒，保留毫秒）"
     )
     end_time = Column(
-        Integer, 
+        Float, 
         nullable=False, 
-        comment="结束时间（秒）"
+        comment="结束时间（秒，保留毫秒）"
     )
     duration = Column(
-        Integer, 
+        Float, 
         nullable=False, 
-        comment="切片时长（秒）"
+        comment="切片时长（秒，保留毫秒）"
     )
     
     # 评分信息
@@ -152,15 +152,30 @@ class Clip(BaseModel):
         return self.status == ClipStatus.FAILED
     
     def get_time_range(self) -> str:
-        """获取时间范围字符串"""
+        """获取时间范围字符串，保留毫秒"""
         try:
-            start_time = int(self.start_time) if self.start_time else 0
-            end_time = int(self.end_time) if self.end_time else 0
-            start_min, start_sec = divmod(start_time, 60)
-            end_min, end_sec = divmod(end_time, 60)
-            return f"{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}"
+            start_time = float(self.start_time) if self.start_time else 0.0
+            end_time = float(self.end_time) if self.end_time else 0.0
+            
+            # 处理开始时间
+            start_hours = int(start_time // 3600)
+            start_remaining = start_time % 3600
+            start_min = int(start_remaining // 60)
+            start_total_sec = start_remaining % 60
+            start_sec = int(start_total_sec)
+            start_ms = int((start_total_sec - start_sec) * 1000)
+            
+            # 处理结束时间
+            end_hours = int(end_time // 3600)
+            end_remaining = end_time % 3600
+            end_min = int(end_remaining // 60)
+            end_total_sec = end_remaining % 60
+            end_sec = int(end_total_sec)
+            end_ms = int((end_total_sec - end_sec) * 1000)
+            
+            return f"{start_hours:02d}:{start_min:02d}:{start_sec:02d},{start_ms:03d} - {end_hours:02d}:{end_min:02d}:{end_sec:02d},{end_ms:03d}"
         except (TypeError, ValueError):
-            return "00:00 - 00:00"
+            return "00:00:00,000 - 00:00:00,000"
     
     def calculate_duration(self):
         """计算切片时长"""

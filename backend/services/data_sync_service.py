@@ -229,7 +229,9 @@ class DataSyncService:
                     # 转换时间格式
                     start_time = self._convert_time_to_seconds(clip_data.get('start_time', '00:00:00'))
                     end_time = self._convert_time_to_seconds(clip_data.get('end_time', '00:00:00'))
-                    duration = end_time - start_time
+                    # 优先使用 clip_data 中已有的实际视频时长（静音处理后通过 ffprobe 获取）
+                    # 否则用时间差计算
+                    duration = clip_data.get('duration', 0) or (end_time - start_time)
                     
                     # 构建视频文件路径，强制使用项目内目录
                     clip_id = clip_data.get('id', str(synced_count + 1))
@@ -568,7 +570,9 @@ class DataSyncService:
                     description=clip_data.get("outline", ""),
                     start_time=self._parse_time(clip_data.get("start_time", "00:00:00")),
                     end_time=self._parse_time(clip_data.get("end_time", "00:00:00")),
-                    duration=self._calculate_duration(
+                    # 优先使用 clip_data 中已有的实际视频时长（静音处理后通过 ffprobe 获取）
+                    # 否则用时间差计算
+                    duration=clip_data.get("duration", 0) or self._calculate_duration(
                         clip_data.get("start_time", "00:00:00"),
                         clip_data.get("end_time", "00:00:00")
                     ),
@@ -683,10 +687,9 @@ class DataSyncService:
         end_seconds = self._parse_time(end_time)
         return end_seconds - start_seconds
 
-    def _convert_time_to_seconds(self, time_str: str) -> int:
-        """将时间字符串转换为秒数"""
+    def _convert_time_to_seconds(self, time_str: str) -> float:
+        """将时间字符串转换为秒数（保留毫秒精度）"""
         try:
-            # 处理格式 "00:00:00,120" 或 "00:00:00.120"
             time_str = time_str.replace(',', '.')
             parts = time_str.split(':')
             hours = int(parts[0])
@@ -696,10 +699,10 @@ class DataSyncService:
             milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
             
             total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
-            return int(total_seconds)
+            return float(total_seconds)
         except Exception as e:
             logger.error(f"时间转换失败: {time_str}, 错误: {e}")
-            return 0
+            return 0.0
     
     def _update_project_status_if_completed(self, project_id: str, project_dir: Path):
         """检查项目是否已完成处理，如果是则更新状态为completed"""

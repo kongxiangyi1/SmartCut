@@ -67,8 +67,90 @@ async def startup_event():
     else:
         logger.warning("未找到API密钥配置")
 
+    # 预加载语音识别模型（避免首次调用延迟）
+    await preload_speech_models()
+
     # 启动WebSocket网关服务 - 已禁用，使用新的简化进度系统
     logger.info("WebSocket网关服务已禁用，使用新的简化进度系统")
+
+async def preload_speech_models():
+    """
+    预加载语音识别模型
+    在应用启动时提前加载模型，避免首次调用时的延迟
+    
+    加载顺序：
+    1. FunASR（默认引擎）
+    2. Whisper（回退引擎）
+    """
+    logger.info("开始预加载语音识别模型...")
+    
+    try:
+        # 导入语音识别模块
+        from backend.utils.speech_recognizer import (
+            _detect_compute_device,
+            _FUNASR_MODEL_CACHE,
+            SpeechRecognitionMethod,
+            SpeechRecognizer
+        )
+        
+        # 检测计算设备
+        device = _detect_compute_device()
+        logger.info(f"检测到计算设备: {device}")
+        
+        # 预加载FunASR模型（默认引擎）
+        try:
+            import time
+            funasr_start = time.time()
+            
+            from funasr import AutoModel
+            
+            use_quantize = os.environ.get("FUNASR_QUANTIZE", "true").lower() == "true"
+            cache_key = f"{device}_{'quantized' if use_quantize else 'full'}"
+            
+            if cache_key not in _FUNASR_MODEL_CACHE:
+                model_kwargs = {
+                    "model": "paraformer-zh",
+                    "vad_model": "fsmn-vad",
+                    "punc_model": "ct-punc",
+                    "device": device,
+                    "disable_update": True,
+                    "cache_dir": str(Path.home() / ".cache" / "funasr"),
+                }
+                
+                if use_quantize:
+                    model_kwargs.update({
+                        "quantize": True,
+                        "int8": True,
+                    })
+                
+                _FUNASR_MODEL_CACHE[cache_key] = AutoModel(**model_kwargs)
+            
+            funasr_elapsed = time.time() - funasr_start
+            logger.info(f"✅ FunASR模型预加载完成，耗时: {funasr_elapsed:.2f}秒")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ FunASR预加载失败: {e}")
+        
+        # 预加载Whisper模型（回退引擎）
+        try:
+            import time
+            whisper_start = time.time()
+            
+            import whisper
+            # 预加载small模型（平衡速度和准确率）
+            whisper.load_model("small")
+            
+            whisper_elapsed = time.time() - whisper_start
+            logger.info(f"✅ Whisper模型预加载完成，耗时: {whisper_elapsed:.2f}秒")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Whisper预加载失败: {e}")
+        
+        logger.info("语音识别模型预加载完成")
+        
+    except Exception as e:
+        logger.error(f"❌ 语音识别模型预加载异常: {e}")
+        # 预加载失败不影响服务启动，首次调用时会自动加载
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -118,16 +118,17 @@ async def upload_files(
         
         # 启动异步处理任务
         try:
-            from backend.tasks.import_processing import process_import_task
+            from backend.utils.simple_task_submitter import get_task_submitter
             
-            # 提交异步任务
-            celery_task = process_import_task.delay(
+            # 使用简化任务提交器提交任务
+            task_submitter = get_task_submitter()
+            submit_result = task_submitter.submit_import_task(
                 project_id=project_id,
                 video_path=str(video_path),
                 srt_file_path=str(srt_path) if srt_path else None
             )
             
-            logger.info(f"项目 {project_id} 异步处理任务已启动，Celery任务ID: {celery_task.id}")
+            logger.info(f"项目 {project_id} 异步处理任务已启动，任务ID: {submit_result['task_id']}")
             
         except Exception as e:
             logger.error(f"启动项目 {project_id} 异步处理失败: {str(e)}")
@@ -386,7 +387,7 @@ async def start_processing(
     processing_service: ProcessingService = Depends(get_processing_service),
     websocket_service: WebSocketNotificationService = Depends(get_websocket_service)
 ):
-    """Start processing a project using Celery task queue."""
+    """Start processing a project using Simplified Task Submitter."""
     try:
         # 获取项目信息
         project = project_service.get(project_id)
@@ -427,33 +428,28 @@ async def start_processing(
             else:
                 srt_path = None
         
-        # 更新项目状态为处理中
-        project_service.update_project_status(project_id, "processing")
-        
         # 发送WebSocket通知：处理开始
         await websocket_service.send_processing_started(
             project_id=project_id,
             message="开始视频处理流程"
         )
         
-        # 提交Celery任务
-        celery_task = process_video_pipeline.delay(
+        # 使用简化的任务提交器
+        from backend.utils.simple_task_submitter import get_task_submitter
+        task_submitter = get_task_submitter()
+        
+        # 提交任务
+        submit_result = task_submitter.submit_video_pipeline(
             project_id=project_id,
             input_video_path=str(video_path),
             input_srt_path=str(srt_path) if srt_path else None
         )
         
-        # 创建处理任务记录
-        task_result = processing_service._create_processing_task(
-            project_id=project_id,
-            task_type="VIDEO_PROCESSING"
-        )
-        
         return {
             "message": "Processing started successfully",
             "project_id": project_id,
-            "task_id": task_result.id,
-            "celery_task_id": celery_task.id,
+            "task_id": submit_result['task_id'],
+            "celery_task_id": submit_result['task_id'],
             "status": "processing"
         }
         
@@ -463,7 +459,7 @@ async def start_processing(
         # 发送错误通知
         try:
             await websocket_service.send_processing_error(
-                project_id=int(project_id),
+                project_id=project_id,
                 error=str(e),
                 step="initialization"
             )

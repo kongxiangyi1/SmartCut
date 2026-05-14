@@ -28,9 +28,10 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
             "project_id": data["project_id"],
             "title": data["title"],
             "description": data["description"],
-            "start_time": int(data["start_time"]) if data["start_time"] is not None else 0,
-            "end_time": int(data["end_time"]) if data["end_time"] is not None else 0,
-            "duration": int(data["duration"]) if data["duration"] is not None else 0,
+            # 保留浮点精度，不转换为整数
+            "start_time": float(data["start_time"]) if data["start_time"] is not None else 0.0,
+            "end_time": float(data["end_time"]) if data["end_time"] is not None else 0.0,
+            "duration": float(data["duration"]) if data["duration"] is not None else 0.0,
             "score": data.get("score"),
             "clip_metadata": data.get("clip_metadata", {}),
             "tags": data.get("tags", [])
@@ -75,7 +76,7 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
                 description=str(clip.description) if clip.description else None,
                 start_time=getattr(clip, 'start_time', 0),
                 end_time=getattr(clip, 'end_time', 0),
-                duration=int(getattr(clip, 'duration', 0)),
+                duration=float(getattr(clip, 'duration', 0)),
                 score=getattr(clip, 'score', None),
                 status=status_value,
                 video_path=getattr(clip, 'video_path', None),

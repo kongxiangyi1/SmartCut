@@ -30,6 +30,14 @@ except ImportError:
     silence_processor_available = False
     logger.warning("静音处理器模块未找到")
 
+# 导入静音拼接器（新模块）
+try:
+    from .silence_concat import SilenceConcat
+    silence_concat_available = True
+except ImportError:
+    silence_concat_available = False
+    logger.warning("静音拼接器模块未找到")
+
 logger = logging.getLogger(__name__)
 
 class VideoProcessor:
@@ -287,6 +295,53 @@ class VideoProcessor:
             return False
     
     @staticmethod
+    def get_video_duration(video_path: Path) -> float:
+        """
+        获取视频的实际时长（秒）
+
+        Args:
+            video_path: 视频文件路径
+
+        Returns:
+            视频时长（秒），获取失败返回0.0
+        """
+        import shutil
+        import re
+
+        try:
+            # 优先使用 ffprobe，如果不存在则使用 ffmpeg
+            ffprobe_path = shutil.which('ffprobe')
+            if ffprobe_path:
+                cmd = [ffprobe_path, '-v', 'error', '-show_entries',
+                       'format=duration', '-of',
+                       'default=noprint_wrappers=1:nokey=1', str(video_path)]
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                      encoding='utf-8', errors='ignore')
+                if result.returncode == 0 and result.stdout.strip():
+                    return float(result.stdout.strip())
+            else:
+                # 使用 ffmpeg 作为替代方案
+                ffmpeg_path = shutil.which('ffmpeg')
+                if ffmpeg_path:
+                    cmd = [ffmpeg_path, '-i', str(video_path), '-f', 'null', '-y']
+                    result = subprocess.run(cmd, capture_output=True, text=True,
+                                          encoding='utf-8', errors='ignore', timeout=30)
+                    # 从 stderr 中解析时长
+                    # 格式: Duration: 00:01:30.50, bitrate: xxx kb/s
+                    output = result.stderr + result.stdout
+                    match = re.search(r'Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d{2})', output)
+                    if match:
+                        hours = int(match.group(1))
+                        minutes = int(match.group(2))
+                        seconds = int(match.group(3))
+                        centiseconds = int(match.group(4))
+                        return float(hours * 3600 + minutes * 60 + seconds + centiseconds / 100)
+            return 0.0
+        except Exception as e:
+            logger.debug(f"获取视频时长失败: {e}")
+            return 0.0
+    
+    @staticmethod
     def create_collection(clips_list: List[Path], output_path: Path) -> bool:
         """
         将多个视频片段拼接成合集
@@ -453,23 +508,34 @@ class VideoProcessor:
             return {}
     
     def batch_extract_clips(self, input_video: Path, clips_data: List[Dict], 
-                           apply_silence_processing: bool = True) -> List[Path]:
+                           apply_silence_processing: bool = True,
+                           use_silence_concat: bool = False) -> List[Path]:
         """
         批量提取视频片段
         
         Args:
             input_video: 输入视频路径
             clips_data: 片段数据列表，每个元素包含id、title、start_time、end_time
-            apply_silence_processing: 是否应用静音处理
+            apply_silence_processing: 是否应用静音处理（调整时间）
+            use_silence_concat: 是否使用静音拼接器（去除长静音，保留所有语音）
             
         Returns:
             成功提取的片段路径列表
         """
-        # 应用静音处理
-        if apply_silence_processing:
+        # 应用静音处理（调整时间边界）
+        if apply_silence_processing and not use_silence_concat:
             clips_data = self.process_silence_for_clips(input_video, clips_data)
         
         successful_clips = []
+        
+        # 初始化静音拼接器（如果启用）
+        silence_concat_processor = None
+        if use_silence_concat and silence_concat_available:
+            silence_concat_processor = SilenceConcat(
+                long_silence_threshold=3.0,
+                short_silence_keep=1.0,
+                buffer_duration=0.2
+            )
         
         for clip_data in clips_data:
             clip_id = clip_data['id']
@@ -477,25 +543,265 @@ class VideoProcessor:
             start_time = clip_data['start_time']
             end_time = clip_data['end_time']
             
-            # 处理时间格式 - 如果是秒数，转换为SRT格式
-            if isinstance(start_time, (int, float)):
-                start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_time)
-            if isinstance(end_time, (int, float)):
-                end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
+            # 转换为秒数（用于静音拼接器）
+            clip_start_sec = start_time
+            clip_end_sec = end_time
+            if isinstance(start_time, str):
+                clip_start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(start_time)
+            if isinstance(end_time, str):
+                clip_end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(end_time)
             
             # 使用标题作为文件名，并清理不合法的字符
-            # 在文件名中包含clip_id，便于后续合集拼接时查找
             safe_title = VideoProcessor.sanitize_filename(title)
             output_path = self.clips_dir / f"{clip_id}_{safe_title}.mp4"
             
             logger.info(f"提取切片 {clip_id}: {start_time} -> {end_time}, 输出: {output_path}")
             
-            if VideoProcessor.extract_clip(input_video, output_path, start_time, end_time):
+            # 使用静音拼接器处理（去除长静音）
+            if silence_concat_processor:
+                success = silence_concat_processor.process_clip(
+                    input_video=input_video,
+                    output_video=output_path,
+                    clip_start=clip_start_sec,
+                    clip_end=clip_end_sec,
+                    clip_id=clip_id
+                )
+            else:
+                # 处理时间格式 - 如果是秒数，转换为FFmpeg格式
+                if isinstance(start_time, (int, float)):
+                    start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_time)
+                if isinstance(end_time, (int, float)):
+                    end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
+                
+                success = VideoProcessor.extract_clip(input_video, output_path, start_time, end_time)
+            
+            if success:
                 successful_clips.append(output_path)
+                actual_duration = VideoProcessor.get_video_duration(output_path)
+                if actual_duration > 0:
+                    clip_data['duration'] = actual_duration
+                    logger.debug(f"切片 {clip_id} 实际时长: {actual_duration:.3f}s")
                 logger.info(f"切片 {clip_id} 提取成功")
             else:
                 logger.error(f"切片 {clip_id} 提取失败")
         
+        return successful_clips
+    
+    def _calculate_optimal_threads(self, clips_count: int) -> int:
+        """
+        根据服务器配置自动计算最优线程数
+        
+        Args:
+            clips_count: 待处理的切片数量
+            
+        Returns:
+            最优线程数
+        """
+        try:
+            import psutil
+            
+            # 获取CPU核心数
+            cpu_cores = psutil.cpu_count(logical=True) or 4
+            
+            # 获取可用内存（GB）
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024 ** 3)
+            
+            # 判断磁盘类型：通过读取速度判断是否为SSD
+            # SSD通常读取速度 > 100MB/s，机械硬盘通常 < 50MB/s
+            disk_io = psutil.disk_io_counters()
+            if disk_io.read_time > 0:
+                read_speed = disk_io.read_bytes / disk_io.read_time / 1024  # KB/s
+                is_ssd = read_speed > 50 * 1024  # > 50MB/s 认为是SSD
+            else:
+                # 默认假设是SSD
+                is_ssd = True
+            
+            # 基础线程数 = CPU核心数的一半（留一半给系统和其他任务）
+            base_threads = max(2, cpu_cores // 2)
+            
+            # 根据磁盘类型调整
+            if is_ssd:
+                disk_factor = 2.0
+                logger.debug(f"检测到SSD，磁盘因子: {disk_factor}")
+            else:
+                disk_factor = 0.5
+                logger.debug(f"检测到机械硬盘，磁盘因子: {disk_factor}")
+            
+            # 根据内存调整
+            if available_gb < 4:
+                memory_factor = 0.5
+            elif available_gb < 8:
+                memory_factor = 0.75
+            else:
+                memory_factor = 1.0
+            logger.debug(f"可用内存: {available_gb:.1f}GB，内存因子: {memory_factor}")
+            
+            # 计算最优线程数
+            optimal_threads = int(base_threads * disk_factor * memory_factor)
+            
+            # 确保线程数在合理范围内
+            min_threads = 1
+            max_threads = min(clips_count, cpu_cores, 16)  # 最大16线程
+            
+            result = max(min_threads, min(optimal_threads, max_threads))
+            logger.info(f"自动计算最优线程数: {result} (CPU: {cpu_cores}核, 内存: {available_gb:.1f}GB, 磁盘: {'SSD' if is_ssd else 'HDD'})")
+            
+            return result
+            
+        except ImportError:
+            # 如果没有psutil，返回默认值
+            logger.debug("psutil未安装，使用默认线程数")
+            return min(4, clips_count)
+        except Exception as e:
+            # 出现异常时返回默认值
+            logger.debug(f"计算最优线程数失败: {e}，使用默认线程数")
+            return min(4, clips_count)
+    
+    def batch_extract_clips_parallel(self, input_video: Path, clips_data: List[Dict],
+                                    apply_silence_processing: bool = True,
+                                    max_workers: int = None,
+                                    progress_callback=None) -> List[Path]:
+        """
+        并行批量提取视频片段（使用多线程同时处理多个切片）
+        
+        Args:
+            input_video: 输入视频路径
+            clips_data: 片段数据列表，每个元素包含id、title、start_time、end_time
+            apply_silence_processing: 是否应用静音处理（调整时间）
+            max_workers: 最大并发线程数，默认None（自动根据服务器配置计算）
+            progress_callback: 进度回调函数，接收 (completed_count, total_count, clip_id, success)
+        
+        Returns:
+            成功提取的片段路径列表
+        
+        性能优化策略:
+            1. 自动检测服务器配置（CPU核心数、内存、磁盘类型）
+            2. SSD自动使用更高并行度，机械硬盘自动降低并行度
+            3. 内存不足时自动减少线程数
+            4. 切片数量较少时自动使用串行处理
+        
+        注意事项:
+            - 并行处理会增加系统资源消耗，但已自动适配服务器配置
+            - 静音处理在并行前统一完成（串行执行），然后并行提取切片
+            - 如果需要使用静音拼接器（use_silence_concat），请使用串行版本
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+        import time
+        
+        # 应用静音处理（在并行前串行执行）
+        if apply_silence_processing:
+            clips_data = self.process_silence_for_clips(input_video, clips_data)
+        
+        total_clips = len(clips_data)
+        successful_clips: List[Path] = []
+        completed_count = 0
+        
+        if total_clips == 0:
+            logger.warning("没有切片需要处理")
+            return successful_clips
+        
+        # 如果切片数量较少，使用串行处理（避免线程开销）
+        if total_clips <= 2:
+            logger.info(f"切片数量较少({total_clips}个)，使用串行处理")
+            return self.batch_extract_clips(input_video, clips_data, 
+                                          apply_silence_processing=False)
+        
+        # 自动计算最优线程数（如果未指定）
+        if max_workers is None:
+            max_workers = self._calculate_optimal_threads(total_clips)
+        
+        # 检测磁盘类型，决定是否添加IO延迟
+        need_io_delay = False
+        try:
+            import psutil
+            disk_io = psutil.disk_io_counters()
+            if disk_io.read_time > 0:
+                read_speed = disk_io.read_bytes / disk_io.read_time / 1024
+                need_io_delay = read_speed <= 50 * 1024  # < 50MB/s 认为是机械硬盘
+        except Exception:
+            pass
+        
+        logger.info(f"开始并行提取 {total_clips} 个切片，使用 {max_workers} 个线程{'（机械硬盘模式）' if need_io_delay else ''}")
+        
+        def _extract_clip_wrapper(clip_data: Dict) -> Tuple[str, bool, str, Optional[Path]]:
+            """切片提取包装函数，用于线程池执行"""
+            clip_id = clip_data['id']
+            title = clip_data.get('title', f"片段_{clip_id}")
+            start_time = clip_data['start_time']
+            end_time = clip_data['end_time']
+            
+            # 转换为秒数
+            clip_start_sec = start_time
+            clip_end_sec = end_time
+            if isinstance(start_time, str):
+                clip_start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(start_time)
+            if isinstance(end_time, str):
+                clip_end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(end_time)
+            
+            # 使用标题作为文件名
+            safe_title = VideoProcessor.sanitize_filename(title)
+            output_path = self.clips_dir / f"{clip_id}_{safe_title}.mp4"
+            
+            logger.debug(f"线程开始处理切片 {clip_id}: {start_time} -> {end_time}")
+            
+            # 处理时间格式
+            if isinstance(start_time, (int, float)):
+                start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_time)
+            if isinstance(end_time, (int, float)):
+                end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
+            
+            success = VideoProcessor.extract_clip(input_video, output_path, start_time, end_time)
+            
+            # 机械硬盘模式：添加IO延迟，避免磁盘过载
+            if need_io_delay:
+                time.sleep(0.1)  # 100ms延迟
+            
+            if success:
+                # 获取实际视频时长并更新 clip_data
+                actual_duration = VideoProcessor.get_video_duration(output_path)
+                if actual_duration > 0:
+                    clip_data['duration'] = actual_duration
+                    logger.debug(f"切片 {clip_id} 实际时长: {actual_duration:.3f}s")
+                return str(clip_id), True, "提取成功", output_path
+            else:
+                return str(clip_id), False, "提取失败", None
+        
+        # 创建线程池
+        with ThreadPoolExecutor(max_workers=max_workers,
+                               thread_name_prefix="VideoClipWorker") as executor:
+            # 提交所有任务
+            future_to_clip: Dict[Future, str] = {}
+            
+            for clip_data in clips_data:
+                future = executor.submit(_extract_clip_wrapper, clip_data)
+                future_to_clip[future] = str(clip_data['id'])
+            
+            # 处理完成的任务
+            for future in as_completed(future_to_clip):
+                clip_id = future_to_clip[future]
+                try:
+                    result_clip_id, success, message, output_path = future.result()
+                    
+                    if success and output_path:
+                        successful_clips.append(output_path)
+                    
+                    # 更新进度
+                    completed_count += 1
+                    if progress_callback:
+                        progress_callback(completed_count, total_clips, clip_id, success)
+                    
+                    # 记录结果
+                    status = "成功" if success else "失败"
+                    logger.info(f"[{completed_count}/{total_clips}] 切片 {clip_id} {status}")
+                    
+                except Exception as e:
+                    completed_count += 1
+                    logger.error(f"[{completed_count}/{total_clips}] 切片 {clip_id} 处理异常: {str(e)}")
+                    if progress_callback:
+                        progress_callback(completed_count, total_clips, clip_id, False)
+        
+        logger.info(f"并行提取完成，成功 {len(successful_clips)}/{total_clips} 个切片")
         return successful_clips
     
     def create_collections_from_metadata(self, collections_data: List[Dict]) -> List[Path]:
