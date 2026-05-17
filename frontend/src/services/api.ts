@@ -116,9 +116,14 @@ export interface BilibiliDownloadTask {
 
 // 设置相关API
 export const settingsApi = {
-  // 获取系统配置
+  // 获取系统配置（返回完整密钥用于回显）
   getSettings: (): Promise<any> => {
     return api.get('/settings')
+  },
+
+  // 获取安全配置（返回掩码密钥用于显示）
+  getSecureSettings: (): Promise<any> => {
+    return api.get('/settings/secure')
   },
 
   // 更新系统配置
@@ -149,6 +154,19 @@ export const settingsApi = {
   // 获取所有可用的语音识别方法
   getSpeechRecognitionMethods: (): Promise<any> => {
     return api.get('/settings/speech-recognition-methods')
+  },
+
+  // 密钥管理
+  backupKey: (backupPath?: string): Promise<any> => {
+    return api.post('/settings/security/backup-key', { backup_path: backupPath })
+  },
+
+  restoreKey: (backupPath: string): Promise<any> => {
+    return api.post('/settings/security/restore-key', { backup_path: backupPath })
+  },
+
+  rotateKey: (): Promise<any> => {
+    return api.post('/settings/security/rotate-key')
   }
 }
 

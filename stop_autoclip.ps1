@@ -70,18 +70,53 @@ Stop-ProcessByFile -PidFile $CELERY_PID_FILE -ServiceName "Celery Worker"
 Stop-ProcessByFile -PidFile $FRONTEND_PID_FILE -ServiceName "Frontend"
 Stop-ProcessByFile -PidFile $BACKEND_PID_FILE -ServiceName "Backend"
 
-$remainingPorts = @(8001, 3000)
+$remainingPorts = @(8090, 3000)
+$stoppedParents = @()
+
 foreach ($port in $remainingPorts) {
-    $proc = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty OwningProcess -Unique
+    $proc = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($proc) {
-        foreach ($processId in $proc) {
-            $processName = (Get-Process -Id $processId -ErrorAction SilentlyContinue).ProcessName
-            Write-Log "Found process using port ${port} (PID: $processId, Name: $processName), stopping..." "WARNING"
-            Stop-Process -Id $processId -Force -Confirm:$false -ErrorAction SilentlyContinue
+        foreach ($conn in $proc) {
+            $processId = $conn.OwningProcess
+            if ($processId -and $processId -ne 0) {
+                try {
+                    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+                    if ($process) {
+                        $processName = $process.ProcessName
+                        Write-Log "Found process using port ${port} (PID: $processId, Name: $processName), stopping..." "WARNING"
+                        $stoppedParents += $processId
+                        Stop-Process -Id $processId -Force -Confirm:$false -ErrorAction SilentlyContinue
+                        Start-Sleep -Milliseconds 500
+                    }
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Write-Log "Could not stop process $processId : $errMsg" "WARNING"
+                }
+            }
         }
     }
 }
+
+# 停止 multiprocessing 子进程
+Write-Log "Checking for multiprocessing child processes..." "INFO"
+foreach ($parentId in $stoppedParents) {
+    $childProcesses = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $cmdLine = $_.CommandLine
+        $cmdLine -match "spawn_main" -and $cmdLine -match "parent_pid=$parentId"
+    }
+    
+    foreach ($child in $childProcesses) {
+        try {
+            Write-Log "Stopping child process (PID: $($child.ProcessId))..." "WARNING"
+            Stop-Process -Id $child.ProcessId -Force -Confirm:$false -ErrorAction SilentlyContinue
+        } catch {
+            Write-Log "Could not stop child process $($child.ProcessId) : $($_.Exception.Message)" "WARNING"
+        }
+    }
+}
+
+# 等待子进程终止
+Start-Sleep -Seconds 2
 
 Write-Host ""
 Write-Log "All services stopped" "SUCCESS"

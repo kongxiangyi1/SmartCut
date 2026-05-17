@@ -468,11 +468,11 @@ async def main():
 
     if result["success"]:
 
-        print(f"✅ 下载成功: {result['video_file']}")
+        print(f"[OK] 下载成功: {result['video_file']}")
 
     else:
 
-        print(f"❌ 下载失败: {result['error']}")
+        print(f"[FAIL] 下载失败: {result['error']}")
 
 
 

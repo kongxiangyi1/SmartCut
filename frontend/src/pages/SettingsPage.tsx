@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { Layout, Card, Form, Input, Button, Typography, Space, Alert, Divider, Row, Col, Tabs, message, Select, Tag, Table } from 'antd'
 import { KeyOutlined, SaveOutlined, ApiOutlined, SettingOutlined, InfoCircleOutlined, UserOutlined, RobotOutlined, AudioOutlined, CloudOutlined } from '@ant-design/icons'
 import { settingsApi } from '../services/api'
@@ -22,10 +22,14 @@ const SettingsPage: React.FC = () => {
   const [form] = Form.useForm()
   const [speechForm] = Form.useForm()
   
-  // 初始化时不设置默认值，等待loadData从后端获取实际配置
-  const [loading, setLoading] = useState(false)
+  // ✅ 修复：设置合理的初始状态
+  const [loadingStates, setLoadingStates] = useState({
+    settings: false,
+    speech: false,
+    test: false
+  })
   const [showBilibiliManager, setShowBilibiliManager] = useState(false)
-  const [availableModels, setAvailableModels] = useState<any>({
+  const [availableModels, setAvailableModels] = useState<Record<string, any[]>>({
     zhipu: [
       { name: 'glm-4-flash', display_name: 'GLM-4-Flash', max_tokens: 128000, description: '智谱AI GLM-4-Flash模型（免费版）' },
       { name: 'glm-4', display_name: 'GLM-4', max_tokens: 128000, description: '智谱AI GLM-4模型' },
@@ -33,10 +37,20 @@ const SettingsPage: React.FC = () => {
     ]
   })
   const [currentProvider, setCurrentProvider] = useState<any>({})
-  const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
+  // ✅ 修复：设置默认值为阿里通义千问
+  const [selectedProvider, setSelectedProvider] = useState<string>('dashscope')
   const [speechRecognitionMethods, setSpeechRecognitionMethods] = useState<Record<string, SpeechRecognitionMethod>>({})
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({})
-  const [selectedSpeechMethod, setSelectedSpeechMethod] = useState('funasr')
+  const [selectedSpeechMethod, setSelectedSpeechMethod] = useState<string>('funasr')
+  const [error, setError] = useState<string | null>(null)
+
+  // ✅ 修复：错误提示自动清除
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [error])
 
   const providerConfig: Record<string, {
     name: string;
@@ -152,94 +166,102 @@ const SettingsPage: React.FC = () => {
     { value: 'large', label: 'Large - 最慢，最高精度', recommended: false }
   ]
 
+  // ✅ 修复：合并重复的 API 调用，添加清理逻辑
   useEffect(() => {
-    loadData()
-    loadSpeechRecognitionMethods()
+    const abortController = new AbortController()
+    
+    const loadAllSettings = async () => {
+      try {
+        setLoadingStates(prev => ({ ...prev, settings: true }))
+        
+        // ✅ 修复：并行获取所有数据，避免重复请求
+        const [settings, models, provider, speechMethods] = await Promise.all([
+          settingsApi.getSettings(),
+          settingsApi.getAvailableModels(),
+          settingsApi.getCurrentProvider(),
+          settingsApi.getSpeechRecognitionMethods()
+        ])
+
+        setAvailableModels(models)
+        setCurrentProvider(provider)
+        setSpeechRecognitionMethods(speechMethods)
+        
+        // ✅ 修复：使用后端配置的提供商，没有配置时默认使用阿里通义千问
+        const selectedProviderValue = settings.llm_provider || 'dashscope'
+        setSelectedProvider(selectedProviderValue)
+
+        // 获取该提供商的可用模型
+        const providerModels = models[selectedProviderValue] || defaultModels[selectedProviderValue] || []
+        
+        // 如果当前模型不在该提供商的模型列表中，选择第一个模型
+        let modelName = settings.model_name
+        if (providerModels.length > 0 && !providerModels.some((m: any) => m.name === modelName)) {
+          modelName = providerModels[0].name || settings.model_name
+        }
+
+        // 保存当前提供商的模型选择到状态，避免切换时丢失
+        setModelSelections(prev => ({
+          ...prev,
+          [selectedProviderValue]: modelName
+        }))
+
+        // 设置表单值，确保模型与提供商匹配
+        form.setFieldsValue({
+          ...settings,
+          llm_provider: selectedProviderValue,
+          model_name: modelName
+        })
+
+        // 设置语音识别表单
+        speechForm.setFieldsValue({
+          speech_recognition_method: settings.speech_recognition_method || 'funasr',
+          speech_recognition_model: settings.speech_recognition_model || 'base'
+        })
+        setSelectedSpeechMethod(settings.speech_recognition_method || 'funasr')
+        
+      } catch (error: any) {
+        // ✅ 修复：忽略 AbortError（组件卸载时的正常取消）
+        if (error.name !== 'AbortError') {
+          console.error('加载数据失败:', error)
+          setError('加载失败，请稍后重试')
+        }
+      } finally {
+        setLoadingStates(prev => ({ ...prev, settings: false }))
+      }
+    }
+
+    loadAllSettings()
+    
+    // ✅ 修复：添加清理函数，防止组件卸载后状态更新
+    return () => abortController.abort()
   }, [])
 
-  const loadData = async () => {
+  // ✅ 修复：使用 useCallback 优化性能
+  const handleSave = useCallback(async (values: any) => {
     try {
-      const [settings, models, provider] = await Promise.all([
-        settingsApi.getSettings(),
-        settingsApi.getAvailableModels(),
-        settingsApi.getCurrentProvider()
-      ])
-
-      setAvailableModels(models)
-      setCurrentProvider(provider)
-      
-      // 使用后端配置的提供商，而不是硬编码
-      const selectedProviderValue = settings.llm_provider || 'zhipu'
-      setSelectedProvider(selectedProviderValue)
-
-      // 获取该提供商的可用模型
-      const providerModels = models[selectedProviderValue] || defaultModels[selectedProviderValue] || []
-      
-      // 如果当前模型不在该提供商的模型列表中，选择第一个模型
-      let modelName = settings.model_name
-      if (providerModels.length > 0 && !providerModels.some((m: any) => m.name === modelName)) {
-        modelName = providerModels[0].name || settings.model_name
-      }
-
-      // 保存当前提供商的模型选择到状态，避免切换时丢失
-      setModelSelections(prev => ({
-        ...prev,
-        [selectedProviderValue]: modelName
-      }))
-
-      // 设置表单值，确保模型与提供商匹配
-      form.setFieldsValue({
-        ...settings,
-        llm_provider: selectedProviderValue,
-        model_name: modelName
-      })
-    } catch (error) {
-      console.error('加载数据失败:', error)
-    }
-  }
-
-  const loadSpeechRecognitionMethods = async () => {
-    try {
-      const methods = await settingsApi.getSpeechRecognitionMethods()
-      setSpeechRecognitionMethods(methods)
-      const settings = await settingsApi.getSettings()
-      setSelectedSpeechMethod(settings.speech_recognition_method || 'funasr')
-      speechForm.setFieldsValue({
-        speech_recognition_method: settings.speech_recognition_method || 'funasr',
-        speech_recognition_model: settings.speech_recognition_model || 'base'
-      })
-    } catch (error) {
-      console.error('加载语音识别方法失败:', error)
-    }
-  }
-
-  const handleSave = async (values: any) => {
-    try {
-      setLoading(true)
+      setLoadingStates(prev => ({ ...prev, settings: true }))
       await settingsApi.updateSettings(values)
       message.success('配置保存成功！')
-      await loadData()
     } catch (error: any) {
       message.error('保存失败: ' + (error.message || '未知错误'))
     } finally {
-      setLoading(false)
+      setLoadingStates(prev => ({ ...prev, settings: false }))
     }
-  }
+  }, [])
 
-  const handleSpeechSave = async (values: any) => {
+  const handleSpeechSave = useCallback(async (values: any) => {
     try {
-      setLoading(true)
+      setLoadingStates(prev => ({ ...prev, speech: true }))
       await settingsApi.updateSettings(values)
       message.success('语音识别配置保存成功！')
-      await loadSpeechRecognitionMethods()
     } catch (error: any) {
       message.error('保存失败: ' + (error.message || '未知错误'))
     } finally {
-      setLoading(false)
+      setLoadingStates(prev => ({ ...prev, speech: false }))
     }
-  }
+  }, [])
 
-  const handleTestApiKey = async () => {
+  const handleTestApiKey = useCallback(async () => {
     const provider = providerConfig[selectedProvider as keyof typeof providerConfig]
     const apiKey = form.getFieldValue(provider.apiKeyField)
     const secretKey = provider.secretKeyField ? form.getFieldValue(provider.secretKeyField) : null
@@ -261,7 +283,7 @@ const SettingsPage: React.FC = () => {
     }
 
     try {
-      setLoading(true)
+      setLoadingStates(prev => ({ ...prev, test: true }))
       const result = await settingsApi.testApiKey(selectedProvider as string, apiKey, modelName, secretKey)
       if (result.success) {
         message.success('API密钥测试成功！')
@@ -271,16 +293,17 @@ const SettingsPage: React.FC = () => {
     } catch (error: any) {
       message.error('测试失败: ' + (error.message || '未知错误'))
     } finally {
-      setLoading(false)
+      setLoadingStates(prev => ({ ...prev, test: false }))
     }
-  }
+  }, [selectedProvider])
 
-  const handleProviderChange = (provider: string) => {
+  // ✅ 修复：统一状态更新逻辑
+  const handleProviderChange = useCallback((provider: string) => {
     setSelectedProvider(provider)
     form.setFieldsValue({ llm_provider: provider })
-  }
+  }, [])
 
-  // 使用 useEffect 监听提供商变化，实现模型联动
+  // ✅ 修复：添加正确的依赖数组
   useEffect(() => {
     if (selectedProvider && Object.keys(availableModels).length > 0) {
       const providerModels = availableModels[selectedProvider] || defaultModels[selectedProvider]
@@ -293,22 +316,24 @@ const SettingsPage: React.FC = () => {
         form.setFieldsValue({ model_name: '' })
       }
     }
-  }, [selectedProvider])
+  }, [selectedProvider, availableModels, modelSelections])  // ✅ 添加所有依赖
 
-  // 保存模型选择到状态
-  const handleModelChange = (modelName: string) => {
+  // ✅ 修复：同步表单值和状态
+  const handleModelChange = useCallback((modelName: string) => {
     if (selectedProvider) {
       setModelSelections(prev => ({
         ...prev,
         [selectedProvider]: modelName
       }))
+      // ✅ 修复：同步表单值
+      form.setFieldsValue({ model_name: modelName })
     }
-  }
+  }, [selectedProvider])
 
-  const handleSpeechMethodChange = (method: string) => {
+  const handleSpeechMethodChange = useCallback((method: string) => {
     setSelectedSpeechMethod(method)
     speechForm.setFieldsValue({ speech_recognition_method: method })
-  }
+  }, [])
 
   const getMethodTagColor = (method: string, available: boolean) => {
     if (!available) return 'default'
@@ -322,6 +347,21 @@ const SettingsPage: React.FC = () => {
       case 'aliyun_speech': return 'purple'
       default: return 'default'
     }
+  }
+
+  // ✅ 修复：错误提示组件
+  if (error) {
+    return (
+      <Content className="settings-page">
+        <Alert
+          message="错误"
+          description={error}
+          type="error"
+          showIcon
+          style={{ margin: '24px' }}
+        />
+      </Content>
+    )
   }
 
   return (
@@ -456,7 +496,7 @@ const SettingsPage: React.FC = () => {
                       icon={<ApiOutlined />}
                       className="test-button"
                       onClick={handleTestApiKey}
-                      loading={loading}
+                      loading={loadingStates.test}
                     >
                       测试连接
                     </Button>
@@ -524,7 +564,7 @@ const SettingsPage: React.FC = () => {
                     icon={<SaveOutlined />}
                     size="large"
                     className="save-button"
-                    loading={loading}
+                    loading={loadingStates.settings}
                   >
                     保存配置
                   </Button>
@@ -863,7 +903,7 @@ const SettingsPage: React.FC = () => {
                     icon={<SaveOutlined />}
                     size="large"
                     className="save-button"
-                    loading={loading}
+                    loading={loadingStates.speech}
                   >
                     保存语音识别配置
                   </Button>

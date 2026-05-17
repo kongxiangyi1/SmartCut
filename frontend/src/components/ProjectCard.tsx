@@ -471,7 +471,28 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
             height: '28px'
           }}>
             <Text style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.8)' }}>
-              {dayjs(project.created_at).tz('Asia/Shanghai').fromNow()}
+              {(() => {
+                const date = dayjs.utc(project.created_at).tz('Asia/Shanghai');
+                const now = dayjs().tz('Asia/Shanghai');
+                
+                const minutes = now.diff(date, 'minute');
+                const hours = Math.floor(minutes / 60);
+                const days = Math.floor(hours / 24);
+                
+                if (minutes < 0) {
+                  return '刚刚';
+                } else if (minutes < 1) {
+                  return '刚刚';
+                } else if (minutes < 60) {
+                  return `${minutes}分钟前`;
+                } else if (hours < 24) {
+                  return `${hours}小时前`;
+                } else if (days < 30) {
+                  return `${days}天前`;
+                } else {
+                  return date.format('YYYY-MM-DD');
+                }
+              })()}
             </Text>
             
             {/* 操作按钮 */}

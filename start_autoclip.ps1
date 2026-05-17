@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 
 param(
-    [int]$BackendPort = 8001,
+    [int]$BackendPort = 8090,
     [int]$FrontendPort = 3000,
     [switch]$SkipStop,
     [switch]$SkipRedis,
@@ -14,7 +14,7 @@ if ($Help) {
     Write-Host "Usage: .\start_autoclip.ps1 [options]"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -BackendPort <port>   Backend port (fixed: 8001)"
+    Write-Host "  -BackendPort <port>   Backend port (fixed: 8090)"
     Write-Host "  -FrontendPort <port>  Frontend port (default: 3000)"
     Write-Host "  -SkipStop             Skip stopping old services"
     Write-Host "  -SkipRedis            Skip Redis check"
