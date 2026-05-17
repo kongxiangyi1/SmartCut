@@ -1,1535 +1,1106 @@
-# AutoClip Code Wiki - AI视频智能切片系统
+# AutoClip Code Wiki
+
+> **项目名称**: AutoClip - AI视频智能切片系统  
+> **文档版本**: 2.0.0  
+> **最后更新**: 2026-05-17  
+> **项目地址**: https://github.com/zhouxiaoka/autoclip
+
+---
 
 ## 目录
-1. [项目概述](#项目概述)
-2. [系统架构](#系统架构)
-3. [主要模块](#主要模块)
-4. [数据模型](#数据模型)
-5. [处理流水线](#处理流水线)
-6. [依赖关系](#依赖关系)
-7. [API说明](#api说明)
-8. [运行方式](#运行方式)
-9. [开发指南](#开发指南)
+
+1. [项目概述](#1-项目概述)
+2. [系统架构](#2-系统架构)
+3. [后端模块详解](#3-后端模块详解)
+4. [前端模块详解](#4-前端模块详解)
+5. [核心处理管线](#5-核心处理管线)
+6. [数据模型](#6-数据模型)
+7. [配置与部署](#7-配置与部署)
+8. [API接口](#8-api接口)
+9. [依赖关系](#9-依赖关系)
+10. [开发指南](#10-开发指南)
 
 ---
 
-## 项目概述
+## 1. 项目概述
 
-### 简介
-AutoClip是一个基于AI的智能视频切片处理系统，能够自动从YouTube、B站等平台下载视频，通过AI分析提取精彩片段，并智能生成合集。系统采用现代化的前后端分离架构，提供直观的Web界面和强大的后端处理能力。
+### 1.1 项目定位
 
-### 核心特性
-- 🎬 **多平台支持**：YouTube、B站视频一键下载，支持本地文件上传
-- 🤖 **AI智能分析**：基于通义千问大语言模型的视频内容理解
-- ✂️ **自动切片**：智能识别精彩片段并自动切割，支持多种视频分类
-- 📚 **智能合集**：AI推荐和手动创建视频合集，支持拖拽排序
-- 🚀 **实时处理**：异步任务队列，实时进度反馈，WebSocket通信
-- 🎨 **现代界面**：React + TypeScript + Ant Design，响应式设计
-- 📱 **移动端支持**（开发中）：响应式设计，正在完善移动端体验
-- 🔐 **账号管理**（开发中）：支持B站多账号管理，自动健康检查
-- 📊 **数据统计**：完整的项目管理和数据统计功能
-- 🛠️ **易于部署**：一键启动脚本，Docker支持，详细文档
-- 📤 **B站上传**（开发中）：自动上传切片视频到B站
-- ✏️ **字幕编辑**（开发中）：可视化字幕编辑和同步功能
+AutoClip 是一款基于AI的智能视频切片处理系统，支持从YouTube/Bilibili下载视频、自动分析提取精彩片段、智能生成合集。系统采用前后端分离架构，提供直观的Web管理界面和强大的异步后端处理能力。
 
----
+### 1.2 功能特点
 
-## 系统架构
-
-### 整体架构图
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         用户界面层                                 │
-│                        (React + TypeScript)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │
-│  │  首页        │  │ 项目详情页   │  │ 设置页      │            │
-│  └──────────────┘  └──────────────┘  └──────────────┘            │
-│         │                  │                  │                   │
-│         └──────────────────┴──────────────────┘                   │
-│                            │                                       │
-└────────────────────────────┼───────────────────────────────────────┘
-                             │ HTTP/WebSocket
-┌────────────────────────────┼───────────────────────────────────────┐
-│                        后端服务层                                  │
-│                       (FastAPI + Python)                           │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐   │
-│  │    API路由      │  │    服务层        │  │  数据存储    │   │
-│  └──────────────────┘  └──────────────────┘  └──────────────┘   │
-│         │                      │                    │            │
-│         └──────────────────────┼────────────────────┘            │
-└────────────────────────────────┼─────────────────────────────────┘
-                                 │
-┌────────────────────────────────┼─────────────────────────────────┐
-│                          任务处理层                              │
-│                      (Celery + Redis)                           │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │
-│  │  处理队列    │  │  视频处理    │  │  AI分析      │            │
-│  └──────────────┘  └──────────────┘  └──────────────┘            │
-└────────────────────────────────┼─────────────────────────────────┘
-                                 │
-┌────────────────────────────────┼─────────────────────────────────┐
-│                         AI服务层                                │
-│              (通义千问LLM + 语音识别模型)                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │
-│  │  大纲提取    │  │  时间线分析  │  │  内容评分    │            │
-│  └──────────────┘  └──────────────┘  └──────────────┘            │
-└────────────────────────────────┼─────────────────────────────────┘
-                                 │
-┌────────────────────────────────┼─────────────────────────────────┐
-│                         数据存储层                               │
-│              (SQLite + 文件系统 + Redis)                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │
-│  │  项目数据    │  │  切片数据    │  │  合集数据    │            │
-│  └──────────────┘  └──────────────┘  └──────────────┘            │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-### 目录结构
-
-```
-autoclip/
-├── backend/                      # 后端代码
-│   ├── api/                     # API路由
-│   │   └── v1/                  # API v1版本
-│   │       ├── projects.py      # 项目管理API
-│   │       ├── clips.py         # 视频片段API
-│   │       ├── collections.py   # 合集管理API
-│   │       ├── youtube.py       # YouTube下载API
-│   │       ├── bilibili.py      # B站下载API
-│   │       └── ...              # 其他API模块
-│   ├── core/                    # 核心配置
-│   │   ├── config.py            # 系统配置
-│   │   ├── database.py          # 数据库配置
-│   │   ├── celery_app.py        # Celery配置
-│   │   ├── path_utils.py        # 路径工具
-│   │   └── websocket_manager.py # WebSocket管理
-│   ├── models/                  # 数据模型
-│   │   ├── base.py              # 基础模型
-│   │   ├── project.py           # 项目模型
-│   │   ├── clip.py              # 切片模型
-│   │   ├── collection.py        # 合集模型
-│   │   ├── task.py              # 任务模型
-│   │   └── bilibili.py          # B站账号模型
-│   ├── services/                # 业务逻辑层
-│   │   ├── project_service.py   # 项目服务
-│   │   ├── clip_service.py      # 切片服务
-│   │   ├── collection_service.py# 合集服务
-│   │   ├── processing_service.py# 处理服务
-│   │   └── ...                  # 其他服务
-│   ├── pipeline/                # 处理流水线
-│   │   ├── step1_outline.py     # 大纲提取
-│   │   ├── step2_timeline.py    # 时间线提取
-│   │   ├── step3_scoring.py     # 内容评分
-│   │   ├── step4_title.py       # 标题生成
-│   │   ├── step5_clustering.py  # 内容聚类
-│   │   └── step6_video.py       # 视频生成
-│   ├── utils/                   # 工具函数
-│   │   ├── llm_client.py        # LLM客户端
-│   │   ├── text_processor.py    # 文本处理
-│   │   ├── video_processor.py   # 视频处理
-│   │   ├── speech_recognizer.py # 语音识别
-│   │   └── ...                  # 其他工具
-│   ├── tasks/                   # Celery任务
-│   │   ├── processing.py        # 处理任务
-│   │   ├── import_processing.py # 导入任务
-│   │   └── ...                  # 其他任务
-│   ├── schemas/                 # Pydantic模式
-│   ├── repositories/            # 数据仓储
-│   └── main.py                  # 应用入口
-├── frontend/                    # 前端代码
-│   ├── src/
-│   │   ├── components/          # React组件
-│   │   ├── pages/               # 页面组件
-│   │   ├── services/            # API服务
-│   │   ├── stores/              # 状态管理(Zustand)
-│   │   └── App.tsx
-│   └── package.json
-├── prompt/                      # 提示词模板
-├── docs/                        # 文档
-├── data/                        # 数据存储
-│   ├── projects/                # 项目数据
-│   ├── uploads/                 # 上传文件
-│   ├── temp/                    # 临时文件
-│   └── output/                  # 输出文件
-├── docker-compose.yml           # Docker编排
-├── requirements.txt             # Python依赖
-└── README.md
-```
-
----
-
-## 主要模块
-
-### 1. 后端模块
-
-#### FastAPI应用入口 (`backend/main.py`)
-
-**职责**：
-- 创建FastAPI应用实例
-- 配置CORS中间件
-- 注册API路由
-- 管理启动和关闭事件
-- 提供静态文件服务（前端构建产物）
-
-**核心功能**：
-```python
-# 关键端点
-GET /api/v1/video-categories  # 获取视频分类
-GET /docs                      # Swagger UI
-GET /redoc                     # Redoc UI
-```
-
-#### 配置管理 (`backend/core/config.py`)
-
-**职责**：
-- 集中管理应用所有配置项
-- 环境变量加载
-- 路径管理
-- 配置验证
-
-**关键配置类**：
-- `Settings`: 主应用设置（基于Pydantic）
-- 数据库配置（SQLite）
-- Redis配置
-- LLM API配置（通义千问）
-- 处理配置（分块大小、评分阈值等）
-
-**关键函数**：
-- `get_project_root()`: 获取项目根目录
-- `get_data_directory()`: 获取数据目录
-- `get_uploads_directory()`: 获取上传目录
-- `get_api_key()`: 获取API密钥
-
-#### 数据库管理 (`backend/core/database.py`)
-
-**职责**：
-- SQLAlchemy引擎创建
-- Session工厂管理
-- 数据库表创建
-- 依赖注入
-
-**技术栈**：
-- SQLAlchemy ORM
-- SQLite（默认，可升级到PostgreSQL）
-
-#### WebSocket管理 (`backend/core/websocket_manager.py`)
-
-**职责**：
-- WebSocket连接管理
-- 实时消息推送
-- 连接状态跟踪
-- 广播功能
-
-#### 路径工具 (`backend/core/path_utils.py`)
-
-**职责**：
-- 统一路径管理
-- 项目目录结构创建
-- 路径验证和规范化
-
----
-
-### 2. 数据模型模块
-
-#### 基础模型 (`backend/models/base.py`)
-
-**职责**：
-- 提供基础模型类
-- 统一ID、时间戳字段
-- 通用工具方法
-
-**字段**：
-- `id`: UUID主键
-- `created_at`: 创建时间
-- `updated_at`: 更新时间
-
-#### 项目模型 (`backend/models/project.py`)
-
-**核心实体**：
-
-```python
-class Project(BaseModel):
-    """项目模型"""
-    # 基本信息
-    name: str                    # 项目名称
-    description: Optional[str]   # 项目描述
-    
-    # 状态信息
-    status: str                  # 项目状态：pending/processing/completed/failed
-    
-    # 项目类型
-    project_type: str            # 项目类型：default/knowledge/entertainment/business等
-    
-    # 文件路径
-    video_path: Optional[str]    # 视频文件路径
-    subtitle_path: Optional[str] # 字幕文件路径
-    video_duration: Optional[int]# 视频时长（秒）
-    thumbnail: Optional[str]     # 缩略图（base64）
-    
-    # 配置和元数据
-    processing_config: Optional[JSON]  # 处理配置
-    project_metadata: Optional[JSON]   # 项目元数据
-    completed_at: Optional[datetime]   # 完成时间
-    
-    # 关系
-    clips: List[Clip]            # 关联切片
-    collections: List[Collection]# 关联合集
-    tasks: List[Task]            # 关联任务
-```
-
-**ProjectType枚举**：
-- `default`: 默认类型
-- `knowledge`: 知识科普
-- `entertainment`: 娱乐内容
-- `business`: 商业内容
-- `experience`: 经验分享
-- `opinion`: 观点评论
-- `speech`: 演讲内容
-- `content_review`: 内容解说
-
-**ProjectStatus枚举**：
-- `pending`: 等待处理
-- `processing`: 处理中
-- `completed`: 已完成
-- `failed`: 处理失败
-
-#### 切片模型 (`backend/models/clip.py`)
-
-**核心实体**：
-
-```python
-class Clip(BaseModel):
-    """切片模型"""
-    # 基本信息
-    title: str                   # 切片标题
-    description: Optional[str]   # 切片描述
-    
-    # 状态
-    status: ClipStatus           # 状态：pending/processing/completed/failed
-    
-    # 时间信息
-    start_time: int              # 开始时间（秒）
-    end_time: int                # 结束时间（秒）
-    duration: int                # 时长（秒）
-    
-    # 评分
-    score: Optional[float]       # 精彩度评分（0-1）
-    recommendation_reason: Optional[str] # 推荐理由
-    
-    # 文件
-    video_path: Optional[str]    # 切片视频路径
-    thumbnail_path: Optional[str]# 缩略图路径
-    
-    # 元数据
-    processing_step: Optional[int] # 当前处理步骤
-    tags: Optional[List[str]]     # 标签
-    clip_metadata: Optional[JSON]  # 完整元数据
-    
-    # 关系
-    project_id: str              # 所属项目ID
-    project: Project             # 所属项目
-    collections: List[Collection]# 所属合集（多对多）
-```
-
-#### 合集模型 (`backend/models/collection.py`)
-
-**核心实体**：
-
-```python
-class Collection(BaseModel):
-    """合集模型"""
-    # 基本信息
-    name: str                    # 合集名称
-    description: Optional[str]   # 合集描述
-    
-    # 关系
-    project_id: str              # 所属项目ID
-    project: Project             # 所属项目
-    clips: List[Clip]            # 包含切片（多对多）
-    
-    # 元数据
-    collection_metadata: Optional[JSON] # 合集元数据
-    export_path: Optional[str]   # 导出视频路径
-    thumbnail_path: Optional[str]# 缩略图路径
-```
-
-#### 任务模型 (`backend/models/task.py`)
-
-**核心实体**：
-
-```python
-class Task(BaseModel):
-    """任务模型"""
-    # 基本信息
-    task_type: str               # 任务类型
-    status: TaskStatus           # 任务状态
-    
-    # 进度
-    progress: float              # 进度（0-100）
-    current_step: Optional[int]  # 当前步骤
-    step_name: Optional[str]     # 步骤名称
-    
-    # 关联
-    project_id: str              # 所属项目ID
-    project: Project             # 所属项目
-    
-    # 元数据
-    task_metadata: Optional[JSON]# 任务元数据
-    error_message: Optional[str] # 错误信息
-```
-
----
-
-### 3. 服务层模块
-
-#### 项目服务 (`backend/services/project_service.py`)
-
-**职责**：
-- 项目CRUD操作
-- 项目创建和更新
-- 项目状态管理
-- 项目删除（含文件清理）
-- 项目查询和分页
-
-**核心方法**：
-```python
-create_project(project_data: ProjectCreate) -> Project
-update_project(project_id: str, project_data: ProjectUpdate) -> Optional[Project]
-get_project_with_stats(project_id: str) -> Optional[ProjectResponse]
-get_projects_paginated(pagination: PaginationParams, filters: Optional[ProjectFilter]) -> ProjectListResponse
-start_project_processing(project_id: str) -> bool
-complete_project(project_id: str) -> bool
-delete_project_with_files(project_id: str) -> bool
-```
-
-#### 处理服务 (`backend/services/processing_service.py`)
-
-**职责**：
-- 视频处理流程协调
-- 步骤执行和状态跟踪
-- 进度更新和通知
-- 错误处理和重试
-
-**核心方法**：
-```python
-start_processing(project_id: str, input_video: Path, input_srt: Optional[Path])
-get_processing_status(project_id: str, task_id: str)
-resume_processing(project_id: str, start_step: str)
-```
-
-#### 切片服务 (`backend/services/clip_service.py`)
-
-**职责**：
-- 切片CRUD操作
-- 切片元数据管理
-- 切片查询和过滤
-
-#### 合集服务 (`backend/services/collection_service.py`)
-
-**职责**：
-- 合集CRUD操作
-- 合集切片管理
-- 拖拽排序支持
-- 合集视频生成
-
----
-
-### 4. API路由模块
-
-#### 项目API (`backend/api/v1/projects.py`)
-
-**主要端点**：
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| POST | /api/v1/projects/upload | 上传视频创建项目 |
-| POST | /api/v1/projects | 创建新项目 |
-| GET | /api/v1/projects | 获取项目列表（分页） |
-| GET | /api/v1/projects/{project_id} | 获取项目详情 |
-| PUT | /api/v1/projects/{project_id} | 更新项目 |
-| DELETE | /api/v1/projects/{project_id} | 删除项目 |
-| POST | /api/v1/projects/{project_id}/process | 开始处理项目 |
-| POST | /api/v1/projects/{project_id}/retry | 重试处理项目 |
-| GET | /api/v1/projects/{project_id}/status | 获取处理状态 |
-| POST | /api/v1/projects/{project_id}/sync-data | 同步项目数据 |
-
-#### 切片API (`backend/api/v1/clips.py`)
-
-**主要端点**：
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| GET | /api/v1/clips | 获取切片列表 |
-| GET | /api/v1/clips/{clip_id} | 获取切片详情 |
-| PUT | /api/v1/clips/{clip_id} | 更新切片 |
-| GET | /api/v1/projects/{project_id}/clips/{clip_id} | 获取切片视频 |
-
-#### 合集API (`backend/api/v1/collections.py`)
-
-**主要端点**：
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| GET | /api/v1/collections | 获取合集列表 |
-| POST | /api/v1/collections | 创建合集 |
-| GET | /api/v1/collections/{collection_id} | 获取合集详情 |
-| PUT | /api/v1/collections/{collection_id} | 更新合集 |
-| DELETE | /api/v1/collections/{collection_id} | 删除合集 |
-| PATCH | /api/v1/collections/{collection_id}/reorder | 重新排序合集切片 |
-| POST | /api/v1/collections/{collection_id}/generate | 生成合集视频 |
-
-#### YouTube API (`backend/api/v1/youtube.py`)
-
-**主要端点**：
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| POST | /api/v1/youtube/parse | 解析YouTube视频信息 |
-| POST | /api/v1/youtube/download | 下载YouTube视频 |
-
-#### B站API (`backend/api/v1/bilibili.py`)
-
-**主要端点**：
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| POST | /api/v1/bilibili/parse | 解析B站视频信息 |
-| POST | /api/v1/bilibili/download | 下载B站视频 |
-
----
-
-### 5. 前端模块
-
-#### 前端技术栈
-
-**核心依赖**：
-- React 18.2: UI框架
-- TypeScript 5.2: 类型安全
-- Ant Design 5.12: UI组件库
-- React Router 6.20: 路由管理
-- Zustand 4.4: 状态管理
-- Axios 1.6: HTTP客户端
-- React Player 2.13: 视频播放器
-- React Beautiful DND 13.1: 拖拽排序
-
-#### 页面组件
-
-1. **首页** (`frontend/src/pages/HomePage.tsx`)
-   - 项目列表展示
-   - 新建项目入口
-   - 项目搜索和过滤
-
-2. **项目详情页** (`frontend/src/pages/ProjectDetailPage.tsx`)
-   - 项目信息展示
-   - 切片列表
-   - 合集管理
-   - 视频播放器
-   - 处理进度显示
-
-3. **设置页** (`frontend/src/pages/SettingsPage.tsx`)
-   - 系统配置
-   - B站账号管理
-   - API密钥配置
-
-#### 核心组件
-
-- `ProjectCard`: 项目卡片组件
-- `ClipCard`: 切片卡片组件
-- `CollectionCard`: 合集卡片组件
-- `UploadModal`: 上传模态框
-- `RealTimeStatus`: 实时状态组件
-- `UnifiedStatusBar`: 统一状态栏
-
-#### 状态管理 (`frontend/src/stores/`)
-
-使用Zustand进行状态管理：
-- 项目状态
-- 处理进度状态
-- 用户界面状态
-
-#### API服务 (`frontend/src/services/api.ts`)
-
-封装Axios调用，提供类型安全的API访问：
-- 项目API
-- 切片API
-- 合集API
-- 处理API
-
----
-
-## 数据模型
-
-### 实体关系图
-
-```
-┌──────────┐    1:N    ┌──────────┐
-│ Project  ├──────────>│   Clip   │
-└─────┬────┘           └────┬─────┘
-      │                     │
-      │ 1:N                 │ N:M
-      │                     │
-      v                     v
-┌──────────┐           ┌──────────────┐
-│  Task    │           │  Collection  │
-└──────────┘           └──────────────┘
-                              ↑
-                              │ 1:N
-                              │
-                      ┌──────────┐
-                      │Bilibili  │
-                      │  Account │
-                      └──────────┘
-```
-
-### 数据库表结构
-
-#### projects表
-| 字段 | 类型 | 约束 | 描述 |
-|------|------|------|------|
-| id | VARCHAR(36) | PRIMARY KEY | UUID主键 |
-| name | VARCHAR(255) | NOT NULL | 项目名称 |
-| description | TEXT | NULLABLE | 项目描述 |
-| status | VARCHAR(50) | NOT NULL DEFAULT 'pending' | 项目状态 |
-| project_type | VARCHAR(50) | NOT NULL DEFAULT 'default' | 项目类型 |
-| video_path | VARCHAR(500) | NULLABLE | 视频文件路径 |
-| subtitle_path | VARCHAR(500) | NULLABLE | 字幕文件路径 |
-| video_duration | INTEGER | NULLABLE | 视频时长（秒） |
-| thumbnail | TEXT | NULLABLE | 缩略图（base64） |
-| processing_config | JSON | NULLABLE | 处理配置 |
-| project_metadata | JSON | NULLABLE | 项目元数据 |
-| completed_at | DATETIME | NULLABLE | 完成时间 |
-| created_at | DATETIME | NOT NULL | 创建时间 |
-| updated_at | DATETIME | NOT NULL | 更新时间 |
-
-#### clips表
-| 字段 | 类型 | 约束 | 描述 |
-|------|------|------|------|
-| id | VARCHAR(36) | PRIMARY KEY | UUID主键 |
-| title | VARCHAR(255) | NOT NULL | 切片标题 |
-| description | TEXT | NULLABLE | 切片描述 |
-| status | VARCHAR(50) | NOT NULL DEFAULT 'pending' | 切片状态 |
-| start_time | INTEGER | NOT NULL | 开始时间（秒） |
-| end_time | INTEGER | NOT NULL | 结束时间（秒） |
-| duration | INTEGER | NOT NULL | 时长（秒） |
-| score | FLOAT | NULLABLE | 精彩度评分 |
-| recommendation_reason | TEXT | NULLABLE | 推荐理由 |
-| video_path | VARCHAR(500) | NULLABLE | 切片视频路径 |
-| thumbnail_path | VARCHAR(500) | NULLABLE | 缩略图路径 |
-| processing_step | INTEGER | NULLABLE | 当前处理步骤 |
-| tags | JSON | NULLABLE | 标签 |
-| clip_metadata | JSON | NULLABLE | 切片元数据 |
-| project_id | VARCHAR(36) | FOREIGN KEY | 所属项目ID |
-| created_at | DATETIME | NOT NULL | 创建时间 |
-| updated_at | DATETIME | NOT NULL | 更新时间 |
-
-#### collections表
-| 字段 | 类型 | 约束 | 描述 |
-|------|------|------|------|
-| id | VARCHAR(36) | PRIMARY KEY | UUID主键 |
-| name | VARCHAR(255) | NOT NULL | 合集名称 |
-| description | TEXT | NULLABLE | 合集描述 |
-| collection_metadata | JSON | NULLABLE | 合集元数据 |
-| export_path | VARCHAR(500) | NULLABLE | 导出视频路径 |
-| thumbnail_path | VARCHAR(500) | NULLABLE | 缩略图路径 |
-| project_id | VARCHAR(36) | FOREIGN KEY | 所属项目ID |
-| created_at | DATETIME | NOT NULL | 创建时间 |
-| updated_at | DATETIME | NOT NULL | 更新时间 |
-
-#### clip_collection关联表
-| 字段 | 类型 | 约束 | 描述 |
-|------|------|------|------|
-| clip_id | VARCHAR(36) | FOREIGN KEY | 切片ID |
-| collection_id | VARCHAR(36) | FOREIGN KEY | 合集ID |
-
-#### tasks表
-| 字段 | 类型 | 约束 | 描述 |
-|------|------|------|------|
-| id | VARCHAR(36) | PRIMARY KEY | UUID主键 |
-| task_type | VARCHAR(50) | NOT NULL | 任务类型 |
-| status | VARCHAR(50) | NOT NULL DEFAULT 'pending' | 任务状态 |
-| progress | FLOAT | NOT NULL DEFAULT 0.0 | 进度 |
-| current_step | INTEGER | NULLABLE | 当前步骤 |
-| step_name | VARCHAR(255) | NULLABLE | 步骤名称 |
-| task_metadata | JSON | NULLABLE | 任务元数据 |
-| error_message | TEXT | NULLABLE | 错误信息 |
-| project_id | VARCHAR(36) | FOREIGN KEY | 所属项目ID |
-| created_at | DATETIME | NOT NULL | 创建时间 |
-| updated_at | DATETIME | NOT NULL | 更新时间 |
-
----
-
-## 处理流水线
-
-### 六步处理流程
-
-AutoClip采用六步处理流水线，从原始视频到最终切片输出：
-
-```
-原始视频 + 字幕
-    ↓
-[步骤1] 大纲提取 (Outline)
-    ↓
-[步骤2] 时间线提取 (Timeline)
-    ↓
-[步骤3] 内容评分 (Scoring)
-    ↓
-[步骤4] 标题生成 (Title)
-    ↓
-[步骤5] 内容聚类 (Clustering)
-    ↓
-[步骤6] 视频生成 (Video)
-    ↓
-最终切片 + 合集
-```
-
-### 步骤详解
-
-#### Step 1: 大纲提取 (`backend/pipeline/step1_outline.py`)
-
-**类名**：`OutlineExtractor`
-
-**职责**：
-- 解析SRT字幕文件
-- 将字幕按时间智能分块（约30分钟/块）
-- 使用LLM从每个文本块中提取视频大纲
-- 合并和去重大纲
-- 保存到step1_outline.json
-
-**关键方法**：
-```python
-extract_outline(srt_path: Path) -> List[Dict]
-save_outline(outlines: List[Dict], output_path: Optional[Path]) -> Path
-load_outline(input_path: Path) -> List[Dict]
-```
-
-**输出格式**：
-```json
-[
-  {
-    "title": "话题标题",
-    "subtopics": ["子话题1", "子话题2"],
-    "chunk_index": 0
-  }
-]
-```
-
-#### Step 2: 时间线提取 (`backend/pipeline/step2_timeline.py`)
-
-**类名**：`TimelineExtractor`
-
-**职责**：
-- 为每个大纲话题定位具体时间区间
-- 多模态边界检测（文本语义 + 语音停顿 + 视频场景）
-- 产品介绍模块化（片段类型识别 + 复用价值评估）
-- 按时间排序并分配固定ID
-
-**关键方法**：
-```python
-extract_timeline(outlines: List[Dict]) -> List[Dict]
-set_media_paths(video_path: Optional[Path], audio_path: Optional[Path])
-save_timeline(timeline_data: List[Dict], output_path: Optional[Path]) -> Path
-```
-
-**新特性**：
-- 集成多模态边界检测
-- 集成产品介绍模块化
-- 支持原始LLM响应缓存
-- 中间文件保存增强健壮性
-
-**输出格式**：
-```json
-[
-  {
-    "id": "1",
-    "outline": "话题标题",
-    "start_time": "00:00:00,000",
-    "end_time": "00:05:30,000",
-    "chunk_index": 0,
-    "segment_type": "product_intro", // 可选
-    "reuse_value": 0.85, // 可选
-    "boundary_refined": true // 可选
-  }
-]
-```
-
-#### Step 3: 内容评分 (`backend/pipeline/step3_scoring.py`)
-
-**职责**：
-- 对每个时间线片段进行精彩度评分
-- 基于内容质量、话题重要性等维度
-- 过滤低于评分阈值的片段
-- 生成推荐理由
-
-**评分维度**：
-- 内容质量
-- 话题重要性
-- 信息密度
-- 表达清晰度
-- 情绪热度
-
-#### Step 4: 标题生成 (`backend/pipeline/step4_title.py`)
-
-**职责**：
-- 为每个高评分片段生成吸引人的标题
-- 基于片段内容和上下文
-- 支持多种标题风格
-
-#### Step 5: 内容聚类 (`backend/pipeline/step5_clustering.py`)
-
-**职责**：
-- 将相关片段聚类到一起
-- 生成推荐合集
-- 支持多种聚类策略（主题、时间、风格等）
-
-#### Step 6: 视频生成 (`backend/pipeline/step6_video.py`)
-
-**类名**：`VideoGenerator`
-
-**职责**：
-- 根据时间区间批量提取切片视频
-- 生成合集视频
-- 生成缩略图
-- 保存完整元数据
-
-**关键方法**：
-```python
-generate_clips(clips_with_titles: List[Dict], input_video: Path) -> List[Path]
-generate_collections(collections_data: List[Dict]) -> List[Path]
-save_clip_metadata(clips_with_titles: List[Dict], output_path: Optional[Path]) -> Path
-save_collection_metadata(collections_data: List[Dict], output_path: Optional[Path]) -> Path
-```
-
-**输出文件**：
-- `clips/{clip_id}_{title}.mp4`: 切片视频
-- `collections/{collection_id}_{title}.mp4`: 合集视频
-- `clips_metadata.json`: 切片完整元数据
-- `collections_metadata.json`: 合集完整元数据
-
----
-
-## 依赖关系
-
-### 后端依赖 (`requirements.txt`)
-
-#### Web框架
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| fastapi | latest | 现代Web框架 |
-| uvicorn[standard] | latest | ASGI服务器 |
-| python-multipart | latest | 文件上传支持 |
-| websockets | latest | WebSocket支持 |
-
-#### 数据库和ORM
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| sqlalchemy | latest | ORM框架 |
-| alembic | latest | 数据库迁移 |
-
-#### 任务队列
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| celery[redis] | latest | 异步任务队列 |
-| redis | latest | 消息代理和缓存 |
-
-#### 数据验证
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| pydantic | latest | 数据验证 |
-| pydantic-settings | latest | 设置管理 |
-
-#### LLM和AI
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| dashscope | latest | 通义千问SDK |
-| openai | latest | OpenAI SDK |
-| google-generativeai | latest | Google AI SDK |
-| pycorrector | latest | 中文文本纠错 |
-| pypinyin | latest | 拼音转换 |
-
-#### 语音识别
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| funasr | latest | 阿里FunASR语音识别 |
-| torch | latest | PyTorch深度学习框架 |
-| torchaudio | latest | 音频处理库 |
-| soundfile | latest | 音频文件读写 |
-
-#### 视频处理
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| yt-dlp | >=2024.12.13 | YouTube/B站视频下载 |
-| pysrt | latest | SRT字幕解析 |
-
-#### HTTP和网络
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| requests | latest | HTTP客户端 |
-| aiohttp | latest | 异步HTTP客户端 |
-| aiofiles | latest | 异步文件操作 |
-
-#### 安全
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| python-jose[cryptography] | latest | JWT令牌 |
-| passlib[bcrypt] | latest | 密码哈希 |
-| cryptography | latest | 加密工具 |
-
-#### 工具
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| psutil | latest | 系统资源监控 |
-| pytz | latest | 时区处理 |
-| qrcode[pil] | latest | 二维码生成 |
-
-#### 测试
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| pytest | latest | 测试框架 |
-| pytest-cov | latest | 测试覆盖率 |
-| pytest-mock | latest | Mock工具 |
-
-### 前端依赖 (`frontend/package.json`)
-
-#### 核心框架
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| react | ^18.2.0 | UI框架 |
-| react-dom | ^18.2.0 | DOM渲染 |
-| typescript | ^5.2.2 | 类型安全 |
-
-#### UI组件库
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| antd | ^5.12.8 | Ant Design组件库 |
-| @ant-design/icons | ^5.2.6 | 图标库 |
-
-#### 路由和导航
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| react-router-dom | ^6.20.1 | 路由管理 |
-
-#### 状态管理
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| zustand | ^4.4.7 | 轻量级状态管理 |
-
-#### HTTP客户端
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| axios | ^1.6.2 | HTTP客户端 |
-
-#### 媒体处理
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| react-player | ^2.13.0 | 视频播放器 |
-| react-dropzone | ^14.2.3 | 文件拖拽上传 |
-
-#### 交互组件
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| react-beautiful-dnd | ^13.1.1 | 拖拽排序 |
-
-#### 工具
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| dayjs | ^1.11.10 | 日期处理 |
-
-#### 构建工具
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| vite | ^5.0.8 | 构建工具 |
-| @vitejs/plugin-react | ^4.2.1 | React插件 |
-
-#### 代码质量
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| eslint | ^8.55.0 | 代码检查 |
-| @typescript-eslint/eslint-plugin | ^6.14.0 | TypeScript ESLint插件 |
-| @typescript-eslint/parser | ^6.14.0 | TypeScript解析器 |
-| eslint-plugin-react-hooks | ^4.6.0 | React Hooks检查 |
-| eslint-plugin-react-refresh | ^0.4.5 | React Refresh检查 |
-
-#### 类型定义
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| @types/react | ^18.2.43 | React类型 |
-| @types/react-dom | ^18.2.17 | React DOM类型 |
-| @types/react-beautiful-dnd | ^13.1.8 | DnD类型 |
-
-### 系统依赖
-
-| 依赖 | 用途 |
+| 特性 | 说明 |
 |------|------|
-| FFmpeg | 视频处理（必须安装） |
-| Redis 6.0+ | 消息代理和缓存（可选，默认使用简化任务运行器） |
-| Python 3.8+ | 后端运行环境 |
-| Node.js 16+ | 前端开发环境 |
+| 多平台下载 | 支持YouTube、Bilibili视频一键下载，支持本地文件上传 |
+| AI智能分析 | 基于大语言模型的视频内容理解和结构分析 |
+| 自动切片 | 智能识别精彩片段，自动切割并评分排序 |
+| 智能合集 | AI推荐或手动创建视频合集，自动聚类分组 |
+| 实时进度 | WebSocket/Celery异步任务，实时反馈处理进度 |
+| 降级策略 | AI分析不可用时自动切换至字幕整理/原始转写模式 |
+| 多LLM支持 | 支持Dashscope、OpenAI、Gemini等6个提供商 |
+| 语音识别 | FunASR中文优化 + Whisper多语言双引擎 |
+
+### 1.3 技术栈总览
+
+| 层级 | 技术选型 | 版本 |
+|------|----------|------|
+| **后端框架** | FastAPI + Uvicorn | Python 3.9+ |
+| **任务队列** | Celery + Redis | Celery 5.x, Redis 7.x |
+| **数据库** | SQLAlchemy + SQLite | 支持升级PostgreSQL |
+| **前端框架** | React 18 + TypeScript 5.2 | Vite 5.0 |
+| **UI组件库** | Ant Design 5.12 | 企业级组件 |
+| **状态管理** | Zustand 4.4 | 轻量级全局状态 |
+| **视频处理** | FFmpeg + yt-dlp | 并行多线程优化 |
+| **AI服务** | 通义千问(Qwen) / 多提供商 | DashScope/OpenAI等 |
+| **语音识别** | FunASR + Whisper | 中文优化+多语言 |
 
 ---
 
-## API说明
+## 2. 系统架构
 
-### 响应格式
+### 2.1 整体架构图
 
-#### 成功响应
-```json
-{
-  "success": true,
-  "data": {},
-  "message": "操作成功"
-}
+```
++-----------------------+      HTTP/WebSocket      +-----------------------+
+|     前端层 (Frontend)  |  <------------------>   |    API网关层 (Backend) |
+|  +-----------------+   |                         |  +-----------------+   |
+|  |   React 18 + TS |   |                         |  |   FastAPI       |   |
+|  |   Ant Design 5  |   |                         |  |   APIRouter     |   |
+|  |   Zustand Store |   |                         |  |   CORS/Security |   |
+|  +-----------------+   |                         |  +-----------------+   |
+|  /  HomePage           |                         |  /projects/*         |
+|  /project/:id          |                         |  /clips/*            |
+|  /settings             |                         |  /collections/*      |
+|  /processing           |                         |  /youtube/*          |
+|  /upload               |                         |  /bilibili/*         |
++-----------------------+                         |  /settings/*         |
+                                                  |  /tasks/*            |
+                                                  |  /health/*           |
+                                                  +----------+------------+
+                                                             |
+          +----------------------+---------------------------+----------------------+
+          |                      |                           |                      |
+          v                      v                           v                      v
++----------------+    +-------------------+    +-------------------+    +-------------------+
+|   服务层        |    |     管线层         |    |     数据访问层      |    |      工具层        |
+|  (Services)    |    |   (Pipeline)      |    |  (Repositories)   |    |     (Utils)       |
++----------------+    +-------------------+    +-------------------+    +-------------------+
+|ProcessingOrche-|    |PipelineManager    |    |ProjectRepository  |    |SpeechRecognition  |
+|strator (770行) |    |Step1~Step6 (6步)  |    |ClipRepository     |    |VideoProcessor     |
+|ProjectService  |    |Fallback Strategy  |    |CollectionRepo     |    |LLMClient (6提供商)|
+|ClipService     |    |Degradation Chain  |    +-------------------+    |FFmpegUtils        |
+|CollectionSvc   |    +-------------------+             |               |SubtitleUtils      |
+|TaskService     |            |                         |               |File/Path/TimeUtils|
+|Bili/YTSvc      |            v                         v               |Encryption (Fernet)|
+|UploadService   |    +-------------------+    +-------------------+    +-------------------+
+|SettingsService |    |    提示词模板       |    |    数据持久层       |
+|LLMService      |    |  (Prompt)         |    |  (Persistence)    |
+|SpeechService   |    +-------------------+    +-------------------+
+|VideoService    |    |outline_prompt.py  |    | SQLite (autoclip.db)|
+|SubtitleService |    |timeline_prompt.py |    | Redis (Cache/Queue) |
+|DataSyncService |    |scoring_prompt.py  |    | FileSystem (data/)  |
+|SimpleTaskRunner|    |title_prompt.py    |    +-------------------+
++----------------+    |clustering_prompt  |
+                      +-------------------+
+                               |
+                               v
+                      +-------------------+
+                      |   任务队列层        |
+                      |  (Celery Workers)  |
+                      +-------------------+
+                      | Processing Queue  |
+                      | Video Queue       |
+                      | Upload Queue      |
+                      | Celery Beat       |
+                      +-------------------+
 ```
 
-#### 错误响应
-```json
-{
-  "success": false,
-  "error": "错误信息",
-  "code": "ERROR_CODE"
-}
+### 2.2 前后端分离设计
+
+```
++-------------+         HTTP/WebSocket          +-------------+
+|  Frontend   |  <----------------------------> |   Backend   |
+|  (Vite)     |     baseURL: localhost:8090     |  (Uvicorn)  |
+|  Port 3000  |                                 |  Port 8090  |
++-------------+                                 +-------------+
+| React Router|                                 | FastAPI     |
+| Axios (300s)|                                 | APIRouter   |
+| Zustand     |                                 | SQLAlchemy  |
+| WebSocket   |                                 | Celery      |
++-------------+                                 +-------------+
 ```
 
-### 项目API
+### 2.3 部署架构
 
-#### 上传视频创建项目
 ```
-POST /api/v1/projects/upload
-Content-Type: multipart/form-data
++-------------------------------------------------------------+
+|                    Docker Compose (生产)                     |
+|  +---------+  +---------+  +---------+  +---------+         |
+|  |  Redis  |  | AutoClip|  |  Celery |  |  Celery |  +----+|
+|  |  :6379  |  | App:8000|  | Worker  |  |  Beat   |  |Flow||
+|  +---------+  +----+----+  +----+----+  +----+----+  |:5555||
+|                    |            |            |       +----+|
++-------------------------------------------------------------+
 
-Body:
-- video_file: File (必填) - 视频文件
-- srt_file: File (可选) - 字幕文件
-- project_name: string (必填) - 项目名称
-- video_category: string (可选) - 视频分类
-
-Response: ProjectResponse
-```
-
-#### 获取项目列表
-```
-GET /api/v1/projects?page=1&size=20&status=pending&project_type=knowledge&search=关键词
-
-Response: ProjectListResponse
-```
-
-#### 获取项目详情
-```
-GET /api/v1/projects/{project_id}?include_clips=true&include_collections=true
-
-Response: ProjectResponse
-```
-
-#### 开始处理项目
-```
-POST /api/v1/projects/{project_id}/process
-
-Response:
-{
-  "message": "Processing started successfully",
-  "project_id": "uuid",
-  "task_id": "uuid",
-  "status": "processing"
-}
-```
-
-#### 获取处理状态
-```
-GET /api/v1/projects/{project_id}/status
-
-Response:
-{
-  "status": "processing",
-  "current_step": 3,
-  "total_steps": 6,
-  "step_name": "内容评分",
-  "progress": 45.5,
-  "error_message": null
-}
-```
-
-### 切片API
-
-#### 获取项目切片列表
-```
-GET /api/v1/projects/{project_id}/clips
-
-Response: ClipListResponse
-```
-
-#### 获取切片视频
-```
-GET /api/v1/projects/{project_id}/clips/{clip_id}
-
-Response: Video/MP4 stream
-```
-
-### 合集API
-
-#### 创建合集
-```
-POST /api/v1/collections
-Content-Type: application/json
-
-Body:
-{
-  "name": "合集名称",
-  "description": "合集描述",
-  "project_id": "project_uuid",
-  "clip_ids": ["clip1_uuid", "clip2_uuid"]
-}
-
-Response: CollectionResponse
-```
-
-#### 重新排序合集切片
-```
-PATCH /api/v1/projects/{project_id}/collections/{collection_id}/reorder
-Content-Type: application/json
-
-Body:
-{
-  "clip_ids": ["clip1_uuid", "clip3_uuid", "clip2_uuid"]
-}
-```
-
-#### 生成合集视频
-```
-POST /api/v1/projects/{project_id}/collections/{collection_id}/generate
-
-Response:
-{
-  "success": true,
-  "message": "合集视频生成成功",
-  "collection_id": "uuid",
-  "output_path": "/path/to/video.mp4",
-  "filename": "collection_name.mp4"
-}
-```
-
-### YouTube/B站API
-
-#### 解析视频信息
-```
-POST /api/v1/youtube/parse
-Content-Type: application/json
-
-Body:
-{
-  "url": "https://www.youtube.com/watch?v=xxx"
-}
-
-Response: VideoInfo
-```
-
-#### 下载视频
-```
-POST /api/v1/youtube/download
-Content-Type: application/json
-
-Body:
-{
-  "url": "https://www.youtube.com/watch?v=xxx",
-  "project_name": "我的项目",
-  "video_category": "knowledge"
-}
-
-Response: DownloadTaskStatus
++-----------------------+        +-----------------------+
+|    本地开发 (Local)    |        |   Windows开发 (Local)  |
+|  +-----------------+  |        |  +-----------------+  |
+|  | Redis :6379     |  |        |  | 无需Redis       |  |
+|  | Backend :8090   |  |        |  | SimpleTaskRunner|  |
+|  | Frontend :3000  |  |        |  | Backend :8090   |  |
+|  | Celery Worker   |  |        |  | Frontend :3000  |  |
+|  +-----------------+  |        |  +-----------------+  |
++-----------------------+        +-----------------------+
 ```
 
 ---
 
-## 运行方式
+## 3. 后端模块详解
 
-### 方式一：Docker部署（推荐）
+### 3.1 API层 (`backend/api/`)
 
-#### 前置条件
-- Docker 20.10+
-- Docker Compose 2.0+
-- 至少4GB内存，推荐8GB+
-- 至少10GB可用磁盘空间
+共23个文件，使用FastAPI的APIRouter组织路由。
 
-#### 快速启动
+| 路由文件 | 端点前缀 | 核心端点 | 职责 |
+|----------|----------|----------|------|
+| `routes/projects.py` | `/projects` | CRUD、处理、重试、状态 | 项目全生命周期管理 |
+| `routes/clips.py` | `/clips` | CRUD、标题生成、评分 | 视频片段管理 |
+| `routes/collections.py` | `/collections` | CRUD、生成合集视频 | 合集管理 |
+| `routes/youtube.py` | `/youtube` | 下载、解析 | YouTube视频下载 |
+| `routes/bilibili.py` | `/bilibili` | 下载、解析、上传 | B站视频下载与上传 |
+| `routes/settings.py` | `/settings` | 获取/更新配置、测试API密钥 | 系统设置管理 |
+| `routes/health.py` | `/health` | 健康检查、服务状态 | 服务状态监控 |
+| `routes/tasks.py` | `/tasks` | 任务状态、进度查询 | 异步任务管理 |
+| `routes/upload.py` | `/upload` | 文件上传处理 | 视频文件上传 |
+| `routes/files.py` | `/files` | 文件服务、静态资源 | 文件下载与访问 |
+| `routes/subtitle_editor.py` | `/subtitle-editor` | 字幕编辑、保存 | 字幕在线编辑 |
 
-```bash
-# 1. 克隆项目
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+### 3.2 核心层 (`backend/core/`)
 
-# 2. 配置环境变量
-cp env.example .env
-# 编辑.env文件，填入API密钥等配置
+共10个文件，提供应用基础设施。
 
-# 3. 启动所有服务
-docker-compose up -d
+| 文件 | 职责 | 关键类/函数 |
+|------|------|------------|
+| `config.py` | Pydantic Settings应用配置 | `Settings`类，环境变量自动加载 |
+| `database.py` | SQLAlchemy数据库连接与会话 | `engine`, `SessionLocal`, `get_db()` |
+| `llm_manager.py` | LLM服务管理（多提供商切换） | `LLMManager`, 提供商注册与切换 |
+| `celery_app.py` | Celery应用配置 | `celery_app`, 队列路由、定时任务 |
+| `dependencies.py` | FastAPI依赖注入 | `get_db`, `get_current_user`等 |
+| `exceptions.py` | 自定义异常类 | `AutoClipException`, `LLMException`等 |
+| `security.py` | 安全和认证 | JWT处理、密码哈希 |
+| `middleware.py` | 中间件配置 | CORS、请求日志、异常处理 |
+| `events.py` | 应用事件处理 | startup/shutdown事件 |
+| `logging_config.py` | 日志配置 | 结构化日志、文件轮转 |
 
-# 4. 查看服务状态
-docker-compose ps
+### 3.3 模型层 (`backend/models/`)
 
-# 5. 查看日志
-docker-compose logs -f
+共6个ORM模型文件。
+
+#### 3.3.1 `project.py` - 项目模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID | 项目唯一标识 |
+| `name` | String | 项目名称 |
+| `status` | Enum | 状态：pending/processing/completed/failed |
+| `source_url` | String | 原始视频URL |
+| `video_path` | String | 本地视频文件路径 |
+| `video_duration` | Float | 视频时长（秒） |
+| `current_step` | Integer | 当前处理步骤（0-6） |
+| `progress` | Float | 整体进度（0-100） |
+| `project_type` | Enum | 类型：knowledge/business/entertainment等 |
+| `created_at` | DateTime | 创建时间 |
+| `updated_at` | DateTime | 更新时间 |
+
+#### 3.3.2 `clip.py` - 片段模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID | 片段唯一标识 |
+| `project_id` | UUID | 所属项目ID（外键） |
+| `title` | String | 片段标题 |
+| `start_time` | Float | 开始时间（秒，保留毫秒） |
+| `end_time` | Float | 结束时间（秒，保留毫秒） |
+| `duration` | Float | 片段时长 |
+| `final_score` | Float | AI精彩评分 |
+| `video_path` | String | 切片视频路径 |
+| `status` | Enum | 状态：pending/generated/failed |
+
+#### 3.3.3 `collection.py` - 合集模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID | 合集唯一标识 |
+| `project_id` | UUID | 所属项目ID（外键） |
+| `collection_title` | String | 合集名称 |
+| `description` | Text | 合集描述 |
+| `clip_ids` | JSON | 包含的片段ID列表 |
+| `collection_type` | Enum | 类型：ai_recommended/manual |
+
+#### 3.3.4 其他模型
+
+| 文件 | 说明 |
+|------|------|
+| `task.py` | 异步任务模型：task_type, status, progress, result |
+| `bilibili_account.py` | B站账号模型：cookie、登录状态 |
+| `upload_record.py` | 上传记录模型：平台、状态、返回信息 |
+
+### 3.4 服务层 (`backend/services/`)
+
+共17个文件，核心业务逻辑封装。
+
+| 文件 | 职责 | 规模/特点 |
+|------|------|----------|
+| `processing_orchestrator.py` | **流程编排核心**，管理6步处理流程 | 770行，最核心的业务编排器 |
+| `project_service.py` | 项目CRUD操作 | 项目全生命周期管理 |
+| `clip_service.py` | 片段管理 | 创建、更新、删除、查询片段 |
+| `collection_service.py` | 合集管理 | 合集CRUD、视频生成调用 |
+| `task_service.py` | 任务管理 | 异步任务状态跟踪 |
+| `bilibili_service.py` | B站下载和上传 | yt-dlp下载、B站API上传 |
+| `youtube_service.py` | YouTube下载 | yt-dlp集成 |
+| `upload_service.py` | 文件上传处理 | 多文件上传、路径管理 |
+| `settings_service.py` | 设置管理 | LLM配置、处理参数持久化 |
+| `llm_service.py` | LLM调用服务 | 统一LLM调用入口 |
+| `speech_service.py` | 语音识别服务 | FunASR/Whisper调度 |
+| `video_service.py` | 视频处理服务 | FFmpeg操作封装 |
+| `subtitle_service.py` | 字幕处理服务 | SRT解析、生成、编辑 |
+| `data_sync_service.py` | 数据同步服务 | 文件系统与数据库同步 |
+| `simple_task_runner.py` | 简化任务运行器 | **不依赖Redis**，本地执行 |
+
+### 3.5 管线层 (`backend/pipeline/`)
+
+共9个文件，实现6步智能处理流程。
+
+| 文件 | 步骤 | 职责 | 技术要点 |
+|------|------|------|----------|
+| `step1_outline.py` | Step 1 | 大纲提取：AI分析视频内容结构 | LLM分析字幕/转写文本 |
+| `step2_timeline.py` | Step 2 | 时间线提取：定位话题时间区间 | 从SRT字幕匹配话题 |
+| `step3_scoring.py` | Step 3 | 精彩评分：多维度评估片段质量 | AI评分 + 本地评分降级 |
+| `step4_title.py` | Step 4 | 标题生成：为高分片段生成标题 | LLM生成吸引力标题 |
+| `step5_clustering.py` | Step 5 | 聚类分组：相关片段组成合集 | scikit-learn聚类 |
+| `step6_video.py` | Step 6 | 视频生成：FFmpeg切割、字幕合成 | 并行提取、字幕烧录 |
+| `base.py` | - | 管线基类 | 抽象接口定义 |
+| `fallback.py` | - | 降级策略 | 三层备选：AI→字幕→转写 |
+| `pipeline_manager.py` | - | 管线管理器 | 步骤调度、状态管理 |
+
+### 3.6 数据访问层 (`backend/repositories/`)
+
+共3个文件，Repository模式封装数据访问。
+
+| 文件 | 职责 |
+|------|------|
+| `project_repository.py` | 项目数据查询、过滤、分页 |
+| `clip_repository.py` | 片段数据查询、按项目/评分过滤 |
+| `collection_repository.py` | 合集数据查询、关联片段加载 |
+
+### 3.7 数据校验层 (`backend/schemas/`)
+
+共6个文件，Pydantic模型定义请求/响应结构。
+
+| 文件 | 说明 |
+|------|------|
+| `project.py` | 项目请求/响应模型：ProjectCreate, ProjectResponse, ProjectList |
+| `clip.py` | 片段请求/响应模型：ClipCreate, ClipResponse, ClipUpdate |
+| `collection.py` | 合集请求/响应模型：CollectionCreate, CollectionResponse |
+| `task.py` | 任务模型：TaskCreate, TaskResponse, TaskStatus |
+| `settings.py` | 设置模型：LLMConfig, ProcessingConfig, SystemSettings |
+| `common.py` | 通用模型：PaginatedResponse, ErrorResponse, StandardResponse |
+
+### 3.8 工具层 (`backend/utils/`)
+
+共18个文件，通用工具函数。
+
+| 文件 | 职责 | 关键函数/类 |
+|------|------|------------|
+| `speech_recognition.py` | 语音识别 | `FunASRRecognizer`, `WhisperRecognizer` |
+| `video_processor.py` | 视频处理 | `VideoProcessor` - FFmpeg并行提取 |
+| `ffmpeg_utils.py` | FFmpeg工具 | 命令构建、进度解析 |
+| `subtitle_utils.py` | 字幕处理 | SRT解析、时间转换 |
+| `llm_client.py` | LLM客户端 | 支持Dashscope/OpenAI/Gemini等6个提供商 |
+| `file_utils.py` | 文件操作 | 安全写入、路径检查 |
+| `path_manager.py` | 路径管理 | 项目目录结构生成 |
+| `time_utils.py` | 时间处理 | 秒转SRT时间格式 |
+| `text_utils.py` | 文本处理 | 清洗、截断、格式化 |
+| `scoring_utils.py` | 评分工具 | 本地评分算法 |
+| `download_utils.py` | 下载工具 | 文件下载、进度回调 |
+| `encryption_utils.py` | 加密工具 | Fernet对称加密 |
+| `config_utils.py` | 配置工具 | 配置读写、验证 |
+
+### 3.9 提示词模板 (`backend/prompt/`)
+
+共5个文件，AI提示词集中管理。
+
+| 文件 | 用途 |
+|------|------|
+| `outline_prompt.py` | 大纲提取提示词：引导LLM分析视频结构 |
+| `timeline_prompt.py` | 时间线提示词：从字幕定位话题时间区间 |
+| `scoring_prompt.py` | 评分提示词：多维度评估片段质量 |
+| `title_prompt.py` | 标题生成提示词：生成吸引力标题 |
+| `clustering_prompt.py` | 聚类提示词：将片段主题归类 |
+
+### 3.10 入口文件 (`backend/main.py`)
+
+```python
+# 核心职责
+- 创建FastAPI应用实例 (title="AutoClip API")
+- 注册CORS中间件 (允许前端跨域)
+- 注册所有API路由 (api/v1/下所有路由)
+- 配置全局异常处理器
+- 数据库初始化 (Base.metadata.create_all)
+- 启动/关闭事件处理
 ```
 
-#### 访问服务
+---
 
-- 前端界面：http://localhost:3000
-- 后端API：http://localhost:8000
-- API文档：http://localhost:8000/docs
-- Flower监控：http://localhost:5555（可选）
+## 4. 前端模块详解
 
-#### 开发环境
+### 4.1 技术栈
 
-```bash
-# 使用开发环境配置
-docker-compose -f docker-compose.dev.yml up -d
+| 技术 | 版本 | 用途 |
+|------|------|------|
+| React | 18.2 | UI框架 |
+| TypeScript | 5.2 | 类型安全 |
+| Vite | 5.0 | 构建工具 |
+| Ant Design | 5.12 | UI组件库 |
+| Zustand | 4.4 | 状态管理 |
+| React Router | 6.x | 路由管理 |
+| Axios | 1.x | HTTP客户端 |
+| React Player | - | 视频播放 |
 
-# 实时查看日志
-docker-compose -f docker-compose.dev.yml logs -f
+### 4.2 路由配置
+
+| 路由 | 页面组件 | 职责 |
+|------|----------|------|
+| `/` | `HomePage.tsx` | 项目列表、上传入口、搜索过滤 |
+| `/project/:id` | `ProjectDetailPage.tsx` | 项目详情、合集展示、片段管理 |
+| `/settings` | `SettingsPage.tsx` | LLM配置、语音识别设置、B站账号 |
+| `/processing` | `ProcessingPage.tsx` | 处理进度监控 |
+| `/upload` | `UploadStatusPage.tsx` | 上传状态展示 |
+
+### 4.3 组件架构 (`frontend/src/components/`)
+
+共46个组件，按功能分类：
+
+| 类别 | 组件 | 职责 |
+|------|------|------|
+| **布局** | Header | 顶部导航栏、全局操作 |
+| **项目** | ProjectCard, ProjectList, ProjectFilter | 项目卡片、列表、过滤 |
+| **片段** | ClipCard, ClipList, ClipPlayer | 片段卡片、列表、播放 |
+| **合集** | CollectionCard, CollectionList | 合集卡片、列表 |
+| **上传** | FileUpload, UploadModal, UploadProgress | 文件上传、进度 |
+| **下载** | BilibiliDownload, BilibiliManager | B站下载、账号管理 |
+| **编辑** | SubtitleEditor | 字幕在线编辑 |
+| **状态** | RealTimeStatus, TaskProgress, ProcessingStatus | 实时状态、任务进度 |
+
+### 4.4 页面职责 (`frontend/src/pages/`)
+
+共9个页面：
+
+| 页面 | 职责 |
+|------|------|
+| `HomePage.tsx` | 项目总览、新建项目、搜索过滤、批量操作 |
+| `ProjectDetailPage.tsx` | 视频预览、合集列表、片段管理、重新处理 |
+| `SettingsPage.tsx` | LLM提供商配置、API密钥设置、语音识别引擎选择、B站Cookie配置 |
+| `ProcessingPage.tsx` | 实时处理进度、步骤详情、日志展示 |
+| `UploadStatusPage.tsx` | 上传队列、上传进度、错误重试 |
+
+### 4.5 状态管理
+
+#### Zustand Store (`frontend/src/store/`)
+
+| Store | 文件 | 规模 | 职责 |
+|-------|------|------|------|
+| 项目状态 | `useProjectStore.ts` | 454行 | 全局项目数据、当前选中、过滤条件 |
+
+#### 简化进度 Store (`frontend/src/stores/`)
+
+| Store | 文件 | 规模 | 职责 |
+|-------|------|------|------|
+| 进度状态 | `useSimpleProgressStore.ts` | 188行 | 处理进度、步骤状态、错误信息 |
+
+### 4.6 API交互 (`frontend/src/services/`)
+
+#### `api.ts` - 核心API客户端 (560行)
+
+```typescript
+// Axios配置
+const apiClient = axios.create({
+  baseURL: 'http://localhost:8090/api/v1',
+  timeout: 300000,  // 300秒超时
+});
+
+// 特性
+- 响应自动解包data字段
+- 429限流自动处理
+- 智能错误提示（中文）
+- 请求/响应拦截器
 ```
 
-### 方式二：本地部署
+| API模块 | 文件 | 职责 |
+|---------|------|------|
+| 项目API | `api.ts` (内部) | 项目CRUD、处理触发 |
+| 上传API | `uploadApi.ts` | 分片上传、进度跟踪 |
+| 字幕API | `subtitleEditorApi.ts` | 字幕获取、保存、编辑 |
 
-#### 前置条件
-- Python 3.8+（推荐3.9+）
-- Node.js 16+（推荐18+）
-- FFmpeg（必须安装）
-- Redis 6.0+（可选，默认使用简化任务运行器）
+### 4.7 自定义Hooks (`frontend/src/hooks/`)
 
-#### 后端设置
+共7个Hooks：
 
-```bash
-# 1. 创建虚拟环境
-python -m venv venv
+| Hook | 文件 | 职责 |
+|------|------|------|
+| `useWebSocket` | `useWebSocket.ts` | WebSocket连接管理、自动重连 |
+| `useProjectPolling` | `useProjectPolling.ts` | 项目状态轮询 |
+| `useTaskProgress` | `useTaskProgress.ts` | 任务进度跟踪 |
+| `useLLMConfig` | `useLLMConfig.ts` | LLM配置获取与更新 |
+| `useNotifications` | `useNotifications.ts` | 全局通知管理 |
+| `useTaskStatus` | `useTaskStatus.ts` | 任务状态查询 |
+| `useCollectionVideoDownload` | `useCollectionVideoDownload.ts` | 合集视频下载 |
 
-# 2. 激活虚拟环境
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
+---
 
-# 3. 安装Python依赖
-pip install -r requirements.txt
+## 5. 核心处理管线
 
-# 4. 配置环境变量
-cp env.example .env
-# 编辑.env文件
+### 5.1 6步处理流程
 
-# 5. 初始化数据库
-python -m backend.init_db
-
-# 6. 启动后端服务
-python -m backend.main
-# 或使用uvicorn
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+用户上传/下载视频
+        |
+        v
++-------------------+
+|  Step 1: 素材准备  |  下载视频、音频提取、获取字幕
+|  step1_outline.py |  如果无字幕 -> 语音识别(FunASR/Whisper)
++-------------------+
+        |
+        v
++-------------------+
+|  Step 2: 内容分析  |  AI分析视频内容结构
+|  step2_timeline.py|  从字幕/转写提取话题大纲
++-------------------+
+        |
+        v
++-------------------+
+|  Step 3: 时间线提取|  从SRT字幕定位话题时间区间
+|  step3_scoring.py |  建立话题->时间戳映射
++-------------------+
+        |
+        v
++-------------------+
+|  Step 4: 精彩评分  |  多维度评估片段质量
+|  step4_title.py   |  AI评分(内容/完整/吸引力)
++-------------------+
+        |
+        v
++-------------------+
+|  Step 5: 标题生成  |  为高分片段生成吸引力标题
+|  step5_clustering.|  阈值过滤(默认0.7)
++-------------------+
+        |
+        v
++-------------------+
+|  Step 6: 视频生成  |  FFmpeg切割视频
+|  step6_video.py   |  添加字幕烧录、生成合集
++-------------------+
+        |
+        v
+    处理完成
 ```
 
-#### 前端设置
+### 5.2 降级策略 (`backend/pipeline/fallback.py`)
 
-```bash
-# 1. 进入前端目录
-cd frontend
+当LLM服务不可用时，系统自动降级：
 
-# 2. 安装依赖
-npm install
-
-# 3. 启动开发服务器
-npm run dev
-
-# 4. 构建生产版本
-npm run build
+```
++----------------------------------+
+|      首选: AI智能分析模式         |
+|  (AI Smart Strategy)             |
+|  依赖: LLM可用                    |
+|  质量: ★★★★★                     |
++----------------------------------+
+              | LLM不可用
+              v
++----------------------------------+
+|      备选1: 字幕整理模式          |
+|  (Subtitle Organized Strategy)   |
+|  依赖: SRT字幕文件                |
+|  质量: ★★★☆☆                     |
++----------------------------------+
+              | 无字幕文件
+              v
++----------------------------------+
+|      备选2: 原始转写模式          |
+|  (Raw Transcript Strategy)       |
+|  依赖: 语音识别结果               |
+|  质量: ★★☆☆☆                     |
++----------------------------------+
 ```
 
-#### 任务运行器（可选）
+### 5.3 数据流向
 
-如果需要使用Celery：
-
-```bash
-# 启动Celery Worker
-celery -A backend.core.celery_app worker --loglevel=info
-
-# 启动Beat调度器
-celery -A backend.core.celery_app beat --loglevel=info
-
-# 启动Flower监控
-celery -A backend.core.celery_app flower --port=5555
+```
++------------+     +-------------+     +-------------+     +------------+
+|  Input     | --> |  Step 1-2   | --> |  Step 3-5   | --> |  Step 6    |
+| Video/URL  |     | 分析&识别    |     | 评分&聚类    |     | 视频生成    |
++------------+     +-------------+     +-------------+     +------------+
+      |                  |                   |                  |
+      v                  v                   v                  v
+  data/projects/    subtitle.srt        clips_metadata     clips/*.mp4
+  video.mp4         outline.json        collections.json   collections/*.mp4
 ```
 
-默认情况下，系统使用简化任务运行器，无需安装Redis。
+---
 
-### 环境变量配置
+## 6. 数据模型
 
-创建`.env`文件：
+### 6.1 数据库表结构
 
-```env
+#### projects 表
+
+```sql
+CREATE TABLE projects (
+    id              UUID PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    description     TEXT,
+    project_type    VARCHAR(50),    -- knowledge/business/entertainment/...
+    status          VARCHAR(50),    -- pending/processing/completed/failed
+    source_url      VARCHAR(1000),  -- 原始视频URL
+    video_path      VARCHAR(500),   -- 本地视频路径
+    subtitle_path   VARCHAR(500),   -- 字幕文件路径
+    video_duration  FLOAT,          -- 视频时长(秒)
+    current_step    INTEGER,        -- 当前步骤 0-6
+    progress        FLOAT,          -- 整体进度 0-100
+    clip_count      INTEGER DEFAULT 0,
+    collection_count INTEGER DEFAULT 0,
+    settings        JSON,           -- 项目特定设置
+    created_at      DATETIME,
+    updated_at      DATETIME,
+    completed_at    DATETIME
+);
+```
+
+#### clips 表
+
+```sql
+CREATE TABLE clips (
+    id              UUID PRIMARY KEY,
+    project_id      UUID REFERENCES projects(id) ON DELETE CASCADE,
+    title           VARCHAR(255) NOT NULL,
+    description     TEXT,
+    start_time      FLOAT,          -- 开始时间(秒)
+    end_time        FLOAT,          -- 结束时间(秒)
+    duration        FLOAT,          -- 片段时长
+    final_score     FLOAT,          -- AI精彩评分
+    content_score   FLOAT,          -- 内容质量分
+    completeness_score FLOAT,       -- 完整性分
+    attractiveness_score FLOAT,     -- 吸引力分
+    video_path      VARCHAR(500),   -- 切片视频路径
+    subtitle_path   VARCHAR(500),   -- 切片字幕路径
+    status          VARCHAR(50),    -- pending/generated/failed
+    tags            JSON,           -- 标签列表
+    clip_metadata   JSON,           -- 元数据
+    collection_ids  JSON,           -- 所属合集ID列表
+    created_at      DATETIME,
+    updated_at      DATETIME
+);
+```
+
+#### collections 表
+
+```sql
+CREATE TABLE collections (
+    id              UUID PRIMARY KEY,
+    project_id      UUID REFERENCES projects(id) ON DELETE CASCADE,
+    collection_title VARCHAR(255),
+    description     TEXT,
+    collection_type VARCHAR(50),    -- ai_recommended/manual
+    clip_ids        JSON,           -- 包含的片段ID列表
+    video_path      VARCHAR(500),   -- 合集视频路径
+    cover_path      VARCHAR(500),   -- 封面图路径
+    status          VARCHAR(50),
+    created_at      DATETIME,
+    updated_at      DATETIME
+);
+```
+
+#### tasks 表
+
+```sql
+CREATE TABLE tasks (
+    id              UUID PRIMARY KEY,
+    project_id      UUID REFERENCES projects(id),
+    task_type       VARCHAR(50),    -- processing/upload/download
+    status          VARCHAR(50),    -- pending/running/success/failed
+    progress        FLOAT,          -- 进度 0-100
+    current_step    INTEGER,
+    step_name       VARCHAR(100),
+    result          JSON,
+    error_message   TEXT,
+    celery_task_id  VARCHAR(255),
+    created_at      DATETIME,
+    updated_at      DATETIME,
+    completed_at    DATETIME
+);
+```
+
+#### 其他表
+
+| 表名 | 说明 |
+|------|------|
+| `bilibili_accounts` | B站账号：cookie、登录状态、过期时间 |
+| `upload_records` | 上传记录：平台、状态、返回信息、错误日志 |
+
+### 6.2 ORM模型关系
+
+```
++----------+       +----------+       +-------------+
+| projects |<----->|  clips   |<----->| collections |
++----------+ 1:N   +----------+  N:M  +-------------+
+     | 1:N              | N:1
+     v                  v
++----------+       +-------------+
+|  tasks   |       | upload_records|
++----------+       +-------------+
+```
+
+---
+
+## 7. 配置与部署
+
+### 7.1 环境变量 (.env)
+
+```bash
 # 数据库配置
 DATABASE_URL=sqlite:///./data/autoclip.db
+# DATABASE_URL=postgresql://user:pass@localhost/autoclip
 
-# Redis配置（可选）
+# Redis配置
 REDIS_URL=redis://localhost:6379/0
 
-# AI API配置
-API_DASHSCOPE_API_KEY=your_dashscope_api_key_here
+# LLM API配置
+API_DASHSCOPE_API_KEY=your_api_key_here
 API_MODEL_NAME=qwen-plus
 API_MAX_TOKENS=4096
 API_TIMEOUT=30
 
-# 处理配置
+# 处理参数
 PROCESSING_CHUNK_SIZE=5000
 PROCESSING_MIN_SCORE_THRESHOLD=0.7
 PROCESSING_MAX_CLIPS_PER_COLLECTION=5
 PROCESSING_MAX_RETRIES=3
 
+# 简化模式（Windows开发推荐，无需Redis）
+USE_SIMPLE_TASK_RUNNER=true
+
 # 日志配置
 LOG_LEVEL=INFO
-LOG_FORMAT=%(asctime)s - %(name)s - %(levelname)s - %(message)s
 LOG_FILE=backend.log
 
-# 应用配置
+# 环境配置
 ENVIRONMENT=development
 DEBUG=true
-ENCRYPTION_KEY=your_encryption_key_here
-
-# 路径配置（可选，使用默认值即可）
-UPLOAD_DIR=./data/uploads
-PROJECT_DIR=./data/projects
-OUTPUT_DIR=./data/output
-
-# 任务运行器配置
-USE_SIMPLE_TASK_RUNNER=true
 ```
 
-### 项目数据目录结构
+### 7.2 Docker Compose部署
+
+```yaml
+# docker-compose.yml 服务概览
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  app:
+    build: .
+    ports: ["8000:8000", "3000:3000"]
+    depends_on: [redis]
+
+  celery-worker:
+    build: .
+    command: celery -A backend.core.celery_app worker --concurrency=2
+    depends_on: [redis]
+
+  celery-beat:
+    build: .
+    command: celery -A backend.core.celery_app beat
+    depends_on: [redis]
+
+  flower:  # 可选：Celery监控
+    image: mher/flower
+    ports: ["5555:5555"]
+```
+
+### 7.3 Dockerfile构建
+
+```
+三阶段构建：
+1. 前端构建 (Node 18)    -> 编译React静态文件
+2. 后端依赖 (Python 3.9) -> 安装Python依赖
+3. 最终镜像              -> 合并前后端，FFmpeg运行时
+
+安全特性：
+- 非root用户运行
+- 最小化镜像层
+- FFmpeg完整功能
+```
+
+### 7.4 本地开发启动
+
+#### 后端启动
+
+```bash
+# 创建虚拟环境
+python -m venv venv
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # Linux/macOS
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 配置环境变量
+cp env.example .env
+
+# 启动Redis (Linux/macOS/有Redis时)
+redis-server
+
+# 启动后端服务
+python -m uvicorn backend.main:app --reload --port 8090
+
+# 启动Celery Worker (需要Redis)
+celery -A backend.core.celery_app worker --loglevel=info
+
+# 或使用简化任务运行器 (Windows/无Redis)
+# USE_SIMPLE_TASK_RUNNER=true 已配置
+```
+
+#### 前端启动
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+#### 访问服务
+
+| 服务 | URL |
+|------|-----|
+| 前端界面 | http://localhost:3000 |
+| 后端API | http://localhost:8090 |
+| API文档 | http://localhost:8090/docs |
+| Flower监控 | http://localhost:5555 (Docker) |
+
+---
+
+## 8. API接口
+
+### 8.1 项目接口 (`/api/v1/projects`)
+
+| 方法 | 端点 | 功能 | 请求体/参数 |
+|------|------|------|------------|
+| POST | `/` | 创建项目 | `{name, source_url, project_type}` |
+| GET | `/` | 项目列表 | `?page=1&size=20&status=&search=` |
+| GET | `/{id}` | 项目详情 | - |
+| PUT | `/{id}` | 更新项目 | `{name, description}` |
+| DELETE | `/{id}` | 删除项目 | - |
+| POST | `/{id}/process` | 开始处理 | `{settings}` |
+| POST | `/{id}/retry` | 重试处理 | - |
+| GET | `/{id}/status` | 处理状态 | - |
+| POST | `/{id}/sync-data` | 同步数据 | - |
+| POST | `/upload` | 上传视频 | `multipart/form-data` |
+
+### 8.2 片段接口 (`/api/v1/clips`)
+
+| 方法 | 端点 | 功能 |
+|------|------|------|
+| POST | `/` | 创建片段 |
+| GET | `/` | 片段列表 (`?project_id=`)
+| GET | `/{id}` | 片段详情 |
+| PUT | `/{id}` | 更新片段 |
+| DELETE | `/{id}` | 删除片段 |
+| PATCH | `/{id}/title` | 更新标题 |
+| POST | `/{id}/generate-title` | AI生成标题 |
+
+### 8.3 合集接口 (`/api/v1/collections`)
+
+| 方法 | 端点 | 功能 |
+|------|------|------|
+| POST | `/` | 创建合集 |
+| GET | `/` | 合集列表 (`?project_id=`)
+| GET | `/{id}` | 合集详情 |
+| PUT | `/{id}` | 更新合集 |
+| DELETE | `/{id}` | 删除合集 |
+| POST | `/{id}/generate-video` | 生成合集视频 |
+
+### 8.4 设置接口 (`/api/v1/settings`)
+
+| 方法 | 端点 | 功能 |
+|------|------|------|
+| GET | `/` | 获取系统设置 |
+| POST | `/` | 更新系统设置 |
+| GET | `/secure` | 获取安全配置(密钥掩码) |
+| POST | `/test-api-key` | 测试API密钥可用性 |
+| GET | `/available-models` | 获取可用模型列表 |
+
+### 8.5 其他接口
+
+| 前缀 | 说明 |
+|------|------|
+| `/api/v1/youtube/*` | YouTube视频解析与下载 |
+| `/api/v1/bilibili/*` | Bilibili视频解析、下载、上传 |
+| `/api/v1/tasks/*` | 异步任务状态查询 |
+| `/api/v1/health/*` | 服务健康检查 |
+| `/api/v1/upload/*` | 文件上传 |
+| `/api/v1/files/*` | 文件下载与静态资源 |
+| `/api/v1/subtitle-editor/*` | 字幕编辑 |
+
+---
+
+## 9. 依赖关系
+
+### 9.1 Python依赖 (requirements.txt)
+
+共29项核心依赖：
+
+| 类别 | 依赖包 | 用途 |
+|------|--------|------|
+| **Web框架** | fastapi, uvicorn, websockets | FastAPI应用、WebSocket支持 |
+| **数据库** | sqlalchemy, alembic | ORM、数据库迁移 |
+| **任务队列** | celery[redis], redis | Celery异步任务、Redis消息代理 |
+| **数据校验** | pydantic, pydantic-settings | 数据模型、配置管理 |
+| **文件处理** | python-multipart, aiohttp, aiofiles | 文件上传、异步HTTP |
+| **视频下载** | yt-dlp | YouTube/Bilibili视频下载 |
+| **字幕处理** | pysrt | SRT字幕解析与生成 |
+| **AI/ML** | funasr | 语音识别(FunASR) |
+| **机器学习** | scikit-learn | 片段聚类(KMeans等) |
+| **安全** | python-jose, passlib, cryptography | JWT、密码哈希、加密 |
+
+### 9.2 模块间依赖关系
+
+```
+main.py
+  ├── core/
+  │     ├── config.py       (基础，被所有模块依赖)
+  │     ├── database.py     (被models, repositories依赖)
+  │     ├── celery_app.py   (被services, tasks依赖)
+  │     ├── llm_manager.py  (被services/llm_service依赖)
+  │     └── ...
+  ├── api/routes/
+  │     ├── projects.py  --> services/project_service.py
+  │     ├── clips.py     --> services/clip_service.py
+  │     ├── settings.py  --> services/settings_service.py
+  │     └── ...
+  ├── services/
+  │     ├── processing_orchestrator.py  --> pipeline/
+  │     ├── project_service.py          --> repositories/
+  │     ├── llm_service.py              --> utils/llm_client.py
+  │     ├── speech_service.py           --> utils/speech_recognition.py
+  │     └── video_service.py            --> utils/video_processor.py
+  ├── pipeline/
+  │     ├── step*.py       --> utils/llm_client.py, utils/scoring_utils.py
+  │     ├── fallback.py    --> step*.py
+  │     └── pipeline_manager.py --> step*.py
+  ├── repositories/
+  │     └── *.py          --> models/
+  ├── models/
+  │     └── *.py          --> core/database.py
+  └── utils/
+        └── *.py          --> core/config.py
+```
+
+---
+
+## 10. 开发指南
+
+### 10.1 目录结构速览
+
+```
+autoclip/
+├── backend/
+│   ├── api/                 # API路由层 (23文件)
+│   │   └── routes/
+│   ├── core/                # 核心配置层 (10文件)
+│   ├── models/              # ORM模型层 (6文件)
+│   ├── repositories/        # 数据访问层 (3文件)
+│   ├── schemas/             # 数据校验层 (6文件)
+│   ├── services/            # 业务服务层 (17文件)
+│   ├── pipeline/            # 处理管线层 (9文件)
+│   ├── utils/               # 工具函数层 (18文件)
+│   ├── prompt/              # 提示词模板 (5文件)
+│   └── main.py              # 应用入口
+├── frontend/
+│   ├── src/
+│   │   ├── components/      # React组件 (46个)
+│   │   ├── pages/           # 页面组件 (9个)
+│   │   ├── services/        # API服务
+│   │   ├── store/           # Zustand状态
+│   │   ├── stores/          # 辅助状态
+│   │   ├── hooks/           # 自定义Hooks (7个)
+│   │   └── config/          # 配置文件
+│   └── package.json
+├── data/                    # 数据目录
+│   ├── autoclip.db          # SQLite主数据库
+│   ├── settings.json        # 系统设置
+│   ├── projects/            # 项目文件存储
+│   └── output/              # 输出目录
+├── scripts/                 # 工具脚本 (27个)
+├── docs/                    # 文档
+├── docker-compose.yml       # Docker编排
+├── Dockerfile               # 构建镜像
+├── requirements.txt         # Python依赖
+└── .env                     # 环境变量
+```
+
+### 10.2 常用命令
+
+#### 后端开发
+
+```bash
+# 启动开发服务器 (带热重载)
+python -m uvicorn backend.main:app --reload --port 8090
+
+# 启动Celery Worker
+python -m celery -A backend.core.celery_app worker --loglevel=info --concurrency=2
+
+# 启动Celery Beat (定时任务)
+python -m celery -A backend.core.celery_app beat --loglevel=info
+
+# 数据库检查
+python check_db.py
+
+# 检查项目状态
+python check_project_status.py <project_id>
+
+# 修复卡住的项目
+python fix_stuck_projects.py
+```
+
+#### 前端开发
+
+```bash
+cd frontend
+
+# 安装依赖
+npm install
+
+# 启动开发服务器
+npm run dev
+
+# 构建生产版本
+npm run build
+
+# 类型检查
+npx tsc --noEmit
+```
+
+#### Docker操作
+
+```bash
+# 启动全部服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f app
+docker-compose logs -f celery-worker
+
+# 重启服务
+docker-compose restart app
+
+# 停止全部
+docker-compose down
+```
+
+### 10.3 脚本工具 (`scripts/`)
+
+| 脚本 | 用途 |
+|------|------|
+| `verify_all.py` | LLM异常降级完整验证 |
+| `check_data_consistency.py` | 数据库与文件系统一致性检查 |
+| `migrate_config.py` | 配置格式迁移 |
+| `test_full_pipeline.py` | 完整6步流程测试 |
+| `view_logs.py` | 格式化查看日志 |
+| `start_pending_tasks.py` | 启动待处理任务 |
+
+### 10.4 项目数据目录结构
 
 ```
 data/
-├── projects/                # 项目数据
-│   └── {project_id}/        # 每个项目一个目录
-│       ├── raw/             # 原始文件
-│       │   ├── input.mp4    # 原始视频
-│       │   └── input.srt    # 原始字幕
-│       ├── metadata/        # 元数据
-│       │   ├── step1_outline.json
-│       │   ├── step2_timeline.json
-│       │   ├── step3_scoring.json
-│       │   ├── step4_titles.json
-│       │   ├── step5_clustering.json
-│       │   ├── clips_metadata.json
-│       │   └── collections_metadata.json
-│       └── output/          # 输出文件
-│           ├── clips/       # 切片视频
-│           └── collections/ # 合集视频
-├── uploads/                 # 上传文件
-├── temp/                    # 临时文件
-└── autoclip.db              # SQLite数据库
+├── autoclip.db                 # SQLite主数据库
+├── settings.json               # LLM和处理配置
+├── user_config.json            # 用户配置
+├── secure_config.json          # 加密配置 (Fernet)
+├── product_keywords.yaml       # 产品关键词
+└── projects/
+    └── {project_id}/
+        ├── video.mp4           # 原始视频
+        ├── audio.wav           # 提取音频
+        ├── subtitle.srt        # 字幕文件
+        ├── outline.json        # AI大纲
+        ├── timeline.json       # 时间线
+        ├── clips/
+        │   └── {clip_id}.mp4   # 切片视频
+        ├── collections/
+        │   └── {collection_id}.mp4  # 合集视频
+        └── temp/               # 临时文件
 ```
+
+### 10.5 视频分类配置
+
+| 分类标识 | 说明 |
+|----------|------|
+| `default` | 通用视频内容处理 |
+| `knowledge` | 科学、技术、历史、文化等知识类 |
+| `entertainment` | 游戏、音乐、电影等娱乐内容 |
+| `business` | 商业、创业、投资等商业内容 |
+| `experience` | 个人经历、生活感悟等经验 |
+| `opinion` | 时事评论、观点分析等评论 |
+| `speech` | 公开演讲、讲座等演讲内容 |
+
+### 10.6 故障排查
+
+| 问题 | 排查步骤 | 解决方案 |
+|------|----------|----------|
+| 端口占用 | `netstat -ano \| findstr :8090` | 结束占用进程或修改端口 |
+| Redis连接失败 | `redis-cli ping` | 启动Redis或启用`USE_SIMPLE_TASK_RUNNER` |
+| FFmpeg未找到 | `ffmpeg -version` | 安装FFmpeg并加入PATH |
+| LLM调用失败 | `python test_llm_connection.py` | 检查API密钥和网络 |
+| 视频生成失败 | 检查`clip_ids`字段 | 确保合包含`clip_ids` |
+| 项目卡住 | `python check_stuck_project.py` | `python fix_stuck_projects.py` |
 
 ---
 
-## 开发指南
-
-### 后端开发
-
-#### 项目结构说明
-
-项目遵循分层架构：
-- `api/`: API路由层（FastAPI）
-- `services/`: 业务逻辑层
-- `repositories/`: 数据访问层
-- `models/`: 数据模型层
-- `schemas/`: Pydantic模式层
-- `pipeline/`: 处理流水线
-- `utils/`: 工具函数
-- `core/`: 核心配置
-- `tasks/`: Celery任务
-
-#### 添加新功能的步骤
-
-1. 在`models/`中定义数据模型
-2. 在`schemas/`中定义Pydantic模式
-3. 在`repositories/`中实现数据访问
-4. 在`services/`中实现业务逻辑
-5. 在`api/`中添加API端点
-6. 在`tasks/`中添加异步任务（如需要）
-7. 编写测试
-8. 更新文档
-
-#### 代码规范
-
-- 遵循PEP 8 Python代码规范
-- 使用类型注解（Type Hints）
-- 编写文档字符串（Docstrings）
-- 使用Gitmoji或Conventional Commits规范提交信息
-
-### 前端开发
-
-#### 组件开发规范
-
-- 使用函数组件 + Hooks
-- 使用TypeScript类型
-- 遵循Ant Design设计规范
-- 使用Zustand进行状态管理
-- 组件化开发，保持组件单一职责
-
-#### 状态管理
-
-使用Zustand进行状态管理：
+## 附录 A: 标准响应格式
 
 ```typescript
-// 示例状态store
-import { create } from 'zustand';
-
-interface ProjectState {
-  projects: Project[];
-  currentProject: Project | null;
-  fetchProjects: () => Promise<void>;
-  setCurrentProject: (project: Project) => void;
+// 统一API响应
+interface StandardResponse<T> {
+  code: number;        // 200成功，其他为错误码
+  message: string;     // 提示信息
+  data: T;            // 业务数据
 }
 
-export const useProjectStore = create<ProjectState>((set) => ({
-  projects: [],
-  currentProject: null,
-  fetchProjects: async () => {
-    // 获取项目列表
-  },
-  setCurrentProject: (project) => set({ currentProject: project }),
-}));
+// 分页响应
+interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
+}
 ```
 
-#### 开发流程
+## 附录 B: 错误代码
 
-```bash
-# 1. 启动开发服务器
-npm run dev
-
-# 2. 代码检查
-npm run lint
-
-# 3. 构建生产版本
-npm run build
-
-# 4. 预览生产版本
-npm run preview
-```
-
-### 测试
-
-#### 后端测试
-
-```bash
-# 运行所有测试
-pytest
-
-# 运行测试并生成覆盖率报告
-pytest --cov=backend
-
-# 运行特定测试文件
-pytest backend/tests/test_processing_framework.py
-```
-
-#### 前端测试
-
-```bash
-# （项目当前未配置前端测试，可添加）
-```
-
-### 数据库迁移
-
-使用Alembic进行数据库迁移：
-
-```bash
-# 初始化迁移（已完成）
-# alembic init alembic
-
-# 创建新迁移
-alembic revision --autogenerate -m "description"
-
-# 应用迁移
-alembic upgrade head
-
-# 回滚迁移
-alembic downgrade -1
-```
-
-### 常见问题排查
-
-#### 问题1：端口被占用
-
-```bash
-# Windows
-netstat -ano | findstr :8000
-taskkill /PID <pid> /F
-
-# Linux/Mac
-lsof -i :8000
-kill -9 <pid>
-```
-
-#### 问题2：FFmpeg未安装
-
-```bash
-# Windows
-# 下载FFmpeg并添加到PATH
-
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt-get install ffmpeg
-
-# CentOS/RHEL
-sudo yum install ffmpeg
-```
-
-#### 问题3：视频下载失败
-
-- 检查网络连接
-- 更新yt-dlp：`pip install --upgrade yt-dlp`
-- 尝试使用浏览器Cookie
-- 检查视频是否可用或需要登录
-
-#### 问题4：AI处理失败
-
-- 检查API密钥是否正确配置
-- 检查网络连接
-- 查看日志获取详细错误信息
-- 尝试使用不同的模型
-
-#### 问题5：数据不一致
-
-```bash
-# 使用同步API
-POST /api/v1/projects/{project_id}/sync-data
-POST /api/v1/sync-all
-
-# 或使用数据同步服务
-```
+| 错误代码 | 说明 | 解决方案 |
+|----------|------|----------|
+| `AUTOCLIP_001` | 项目不存在 | 检查项目ID |
+| `AUTOCLIP_002` | 视频文件不存在 | 检查视频路径 |
+| `AUTOCLIP_003` | 字幕文件不存在 | 检查字幕路径或自动生成 |
+| `AUTOCLIP_004` | LLM调用失败 | 检查API密钥和网络 |
+| `AUTOCLIP_005` | 视频处理失败 | 检查FFmpeg安装和格式 |
+| `AUTOCLIP_006` | 数据库操作失败 | 检查数据库连接和权限 |
 
 ---
 
-## 附录
+**文档结束**
 
-### 视频分类说明
-
-| 分类 | 值 | 描述 | 图标 |
-|------|-----|------|------|
-| 默认 | default | 通用视频内容处理 | 🎬 |
-| 知识科普 | knowledge | 科学、技术、历史、文化等知识类内容 | 📚 |
-| 娱乐 | entertainment | 游戏、音乐、电影等娱乐内容 | 🎮 |
-| 商业 | business | 商业、创业、投资等商业内容 | 💼 |
-| 经验分享 | experience | 个人经历、生活感悟等经验内容 | 🌟 |
-| 观点评论 | opinion | 时事评论、观点分析等评论内容 | 💭 |
-| 演讲 | speech | 公开演讲、讲座等演讲内容 | 🎤 |
-
-### 联系和支持
-
-- 问题反馈：GitHub Issues
-- 功能建议：GitHub Discussions
-- 邮箱：christine_zhouye@163.com
-
-### 许可证
-
-本项目采用MIT许可证。
-
----
-
-*文档最后更新：2025-05-05*
+> 如有问题，请联系: christine_zhouye@163.com

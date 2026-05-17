@@ -39,8 +39,12 @@ settings = Settings()
 def get_project_root() -> Path:
     """获取项目根目录"""
     # 使用新的路径工具
-    from backend.core.path_utils import get_project_root as get_root
-    return get_root()
+    try:
+        from backend.core.path_utils import get_project_root as get_root
+        return get_root()
+    except ImportError:
+        # 备用实现
+        return Path(__file__).parent.parent.parent
 
 def get_data_directory() -> Path:
     """获取数据目录"""

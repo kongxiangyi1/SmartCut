@@ -36,10 +36,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 使用统一的API路由注册
-from api.v1 import api_router
-from core.database import engine
-from models.base import Base
+# 使用统一的API路由注册（延迟导入，避免过早加载模型）
+from core.database import engine, Base
 
 # Create FastAPI app
 app = FastAPI(
@@ -54,8 +52,8 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     logger.info("启动AutoClip API服务...")
-    # 导入所有模型以确保表被创建
-    from models.bilibili import BilibiliAccount, UploadRecord
+    # 不再导入模型，因为api_router已经导入了
+    # 直接创建表
     Base.metadata.create_all(bind=engine)
     logger.info("数据库表创建完成")
 
@@ -67,8 +65,9 @@ async def startup_event():
     else:
         logger.warning("未找到API密钥配置")
 
-    # 预加载语音识别模型（避免首次调用延迟）
-    await preload_speech_models()
+    # 预加载语音识别模型（避免首次调用延迟）- 暂时禁用以加快测试
+    # await preload_speech_models()
+    logger.info("语音识别模型预加载已跳过")
 
     # 启动WebSocket网关服务 - 已禁用，使用新的简化进度系统
     logger.info("WebSocket网关服务已禁用，使用新的简化进度系统")
@@ -126,10 +125,10 @@ async def preload_speech_models():
                 _FUNASR_MODEL_CACHE[cache_key] = AutoModel(**model_kwargs)
             
             funasr_elapsed = time.time() - funasr_start
-            logger.info(f"✅ FunASR模型预加载完成，耗时: {funasr_elapsed:.2f}秒")
+            logger.info(f"[OK] FunASR模型预加载完成，耗时: {funasr_elapsed:.2f}秒")
             
         except Exception as e:
-            logger.warning(f"⚠️ FunASR预加载失败: {e}")
+            logger.warning(f"[WARN] FunASR预加载失败: {e}")
         
         # 预加载Whisper模型（回退引擎）
         try:
@@ -141,15 +140,15 @@ async def preload_speech_models():
             whisper.load_model("small")
             
             whisper_elapsed = time.time() - whisper_start
-            logger.info(f"✅ Whisper模型预加载完成，耗时: {whisper_elapsed:.2f}秒")
+            logger.info(f"[OK] Whisper模型预加载完成，耗时: {whisper_elapsed:.2f}秒")
             
         except Exception as e:
-            logger.warning(f"⚠️ Whisper预加载失败: {e}")
+            logger.warning(f"[WARN] Whisper预加载失败: {e}")
         
         logger.info("语音识别模型预加载完成")
         
     except Exception as e:
-        logger.error(f"❌ 语音识别模型预加载异常: {e}")
+        logger.error(f"[FAIL] 语音识别模型预加载异常: {e}")
         # 预加载失败不影响服务启动，首次调用时会自动加载
 
 @app.on_event("shutdown")
@@ -166,7 +165,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include unified API routes
+# Include unified API routes（延迟导入，避免过早加载模型）
+from api.v1 import api_router
 app.include_router(api_router, prefix="/api/v1")
 
 # 静态文件服务配置
@@ -194,14 +194,14 @@ async def get_video_categories():
                 "value": "default",
                 "name": "默认",
                 "description": "通用视频内容处理",
-                "icon": "🎬",
+                "icon": "[VIDEO]",
                 "color": "#4facfe"
             },
             {
                 "value": "knowledge",
                 "name": "知识科普",
                 "description": "科学、技术、历史、文化等知识类内容",
-                "icon": "📚",
+                "icon": "[DOC]",
                 "color": "#52c41a"
             },
             {
@@ -251,8 +251,8 @@ app.add_exception_handler(Exception, global_exception_handler)
 if __name__ == "__main__":
     import uvicorn
 
-    # 默认端口
-    port = 8000
+    # 默认端口 - 固定为8090
+    port = 8090
 
     # 检查命令行参数
     if len(sys.argv) > 1:

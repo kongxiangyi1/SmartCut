@@ -70,10 +70,25 @@ def compute_percent(stage: str, subpercent: Optional[float] = None) -> int:
         return min(99, done + int(cur * subpercent / 100))
 
 
+def _notify_websocket(project_id: str, stage: str, percent: int, message: str):
+    """发送WebSocket通知"""
+    try:
+        from backend.services.websocket_notification_service import get_websocket_notifier
+        notifier = get_websocket_notifier()
+        notifier.notify_progress(
+            project_id=project_id,
+            progress=float(percent),
+            stage=stage,
+            message=message
+        )
+    except Exception as e:
+        logger.warning(f"WebSocket通知失败: {e}")
+
+
 def emit_progress(project_id: str, stage: str, message: str = "", subpercent: Optional[float] = None):
     """
     发送进度事件
-    
+
     Args:
         project_id: 项目ID
         stage: 当前阶段
@@ -82,8 +97,9 @@ def emit_progress(project_id: str, stage: str, message: str = "", subpercent: Op
     """
     if not r:
         logger.warning("Redis未连接，跳过进度发送")
+        _notify_websocket(project_id, stage, compute_percent(stage, subpercent), message)
         return
-        
+
     percent = compute_percent(stage, subpercent)
     payload = {
         "project_id": project_id,
@@ -92,21 +108,24 @@ def emit_progress(project_id: str, stage: str, message: str = "", subpercent: Op
         "message": message,
         "ts": int(time.time())
     }
-    
+
     try:
         # 1) 持久化最新快照（给轮询/刷新用）
         r.hset(f"progress:project:{project_id}", mapping={
-            "stage": stage, 
-            "percent": str(percent), 
-            "message": message, 
+            "stage": stage,
+            "percent": str(percent),
+            "message": message,
             "ts": str(payload["ts"])
         })
-        
+
         # 2) 即时广播（可选，用于WebSocket）
         r.publish(f"progress:project:{project_id}", json.dumps(payload))
-        
+
         logger.info(f"进度事件已发送: {project_id} - {stage} ({percent}%) - {message}")
-        
+
+        # 3) WebSocket实时推送
+        _notify_websocket(project_id, stage, percent, message)
+
     except Exception as e:
         logger.error(f"发送进度事件失败: {e}")
 

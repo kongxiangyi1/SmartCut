@@ -9,9 +9,9 @@ from pathlib import Path
 from collections import defaultdict
 
 # 导入依赖
-from ..utils.llm_client import LLMClient
 from ..utils.text_processor import TextProcessor
 from ..core.shared_config import PROMPT_FILES, METADATA_DIR
+from ..core.llm_manager import LLMManager
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class TimelineExtractor:
     """从大纲和SRT字幕中提取精确时间线"""
     
     def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None):
-        self.llm_client = LLMClient()
+        self.llm_manager = LLMManager()
         self.text_processor = TextProcessor()
         
         # 使用传入的metadata_dir或默认值
@@ -125,9 +125,15 @@ class TimelineExtractor:
                     parsed_items = None
                     max_parse_retries = 2
                     
-                    for retry_count in range(max_parse_retries + 1):
+                    # 检查是否有可用的LLM提供商
+                    if not self.llm_manager.current_provider:
+                        logger.warning(f"  > 块 {chunk_index} 没有可用的LLM提供商，跳过")
+                        break
+                    
+                    for retry_count in range(1, max_parse_retries + 2):
                         try:
-                            raw_response = self.llm_client.call_with_retry(self.timeline_prompt, input_data)
+                            llm_response = self.llm_manager.current_provider.call(self.timeline_prompt, input_data)
+                            raw_response = llm_response.content if llm_response else None
                             
                             if not raw_response:
                                 logger.warning(f"  > 块 {chunk_index} LLM响应为空，跳过")
@@ -223,10 +229,10 @@ class TimelineExtractor:
         
         try:
             # 尝试解析JSON
-            parsed_response = self.llm_client.parse_json_response(response)
+            parsed_response = self._parse_json_response(response)
             
             # 验证JSON结构
-            if not self.llm_client._validate_json_structure(parsed_response):
+            if not self._validate_json_structure(parsed_response):
                 logger.error(f"  > 块 {chunk_index} JSON结构验证失败")
                 self._save_debug_response(str(parsed_response), chunk_index, "invalid_structure")
                 return []
@@ -321,6 +327,82 @@ class TimelineExtractor:
             logger.info(f"调试响应已保存到: {debug_file}")
         except Exception as e:
             logger.error(f"保存调试响应失败: {e}")
+    
+    def _parse_json_response(self, response: str) -> Any:
+        """解析JSON响应，支持多种格式"""
+        import json
+        import re
+        
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            pass
+        
+        try:
+            match = re.search(r'\{.*\}', response, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except:
+            pass
+        
+        try:
+            match = re.search(r'\[.*\]', response, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except:
+            pass
+        
+        items = self._parse_markdown_table(response)
+        if items:
+            return items
+        
+        return None
+    
+    def _parse_markdown_table(self, response: str) -> List[Dict]:
+        """从markdown表格中提取时间线数据"""
+        lines = response.split('\n')
+        results = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('|') is False:
+                continue
+            if '---' in line or '主题' in line.lower() or '话题' in line.lower() or '时间' in line.lower():
+                continue
+            
+            parts = [p.strip() for p in line.split('|')[1:-1]]
+            if len(parts) < 2:
+                continue
+            
+            outline = parts[0]
+            outline = re.sub(r'\*\*', '', outline)
+            outline = re.sub(r'[#*`]', '', outline)
+            outline = outline.strip()
+            
+            time_str = parts[1]
+            time_str = re.sub(r'[`*#]', '', time_str)
+            
+            time_match = re.findall(r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})', time_str)
+            if time_match:
+                start_time = time_match[0][0].replace('.', ',')
+                end_time = time_match[0][1].replace('.', ',')
+                
+                if outline and start_time and end_time:
+                    results.append({
+                        "outline": outline,
+                        "start_time": start_time,
+                        "end_time": end_time
+                    })
+        
+        return results if results else None
+    
+    def _validate_json_structure(self, parsed_response: Any) -> bool:
+        """验证JSON结构"""
+        if parsed_response is None:
+            return False
+        if not isinstance(parsed_response, (list, dict)):
+            return False
+        return True
 
     def _fix_overlapping_times(self, timeline_data: List[Dict]) -> List[Dict]:
         """

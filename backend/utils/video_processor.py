@@ -10,6 +10,9 @@ import os
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
+# 创建 logger
+logger = logging.getLogger(__name__)
+
 # 修复导入问题
 try:
     from ..core.shared_config import CLIPS_DIR, COLLECTIONS_DIR
@@ -819,7 +822,12 @@ class VideoProcessor:
         for collection_data in collections_data:
             collection_id = collection_data['id']
             collection_title = collection_data.get('collection_title', f'合集_{collection_id}')
-            clip_ids = collection_data['clip_ids']
+            
+            # 安全获取 clip_ids，使用 .get() 方法避免 KeyError
+            clip_ids = collection_data.get('clip_ids')
+            if not clip_ids:
+                logger.warning(f"合集 {collection_id} 缺少 clip_ids 字段，跳过此合集")
+                continue
             
             # 构建片段路径列表
             clips_list = []

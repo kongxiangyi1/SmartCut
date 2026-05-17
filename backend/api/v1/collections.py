@@ -130,7 +130,7 @@ async def get_collections(
 
         
 
-        pagination = PaginationParams(page=page, size=size)
+        pagination = PaginationParams(page=page, page_size=size)
 
         
 

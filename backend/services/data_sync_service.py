@@ -200,22 +200,14 @@ class DataSyncService:
                         safe_title = safe_title.replace(' ', '_')
                         
                         # 强制使用项目内标准路径
-                        from ..core.path_utils import get_project_directory
+                        from backend.core.path_utils import get_project_directory
                         project_dir = get_project_directory(project_id)
                         project_clips_dir = project_dir / "output" / "clips"
                         project_clips_dir.mkdir(parents=True, exist_ok=True)
                         project_video_path = project_clips_dir / f"{clip_id}_{safe_title}.mp4"
                         
                         # 兼容旧的全局输出目录，如果存在则迁移到项目目录
-                        from ..core.path_utils import get_data_directory
-                        legacy_video_path = get_data_directory() / "output" / "clips" / f"{clip_id}_{safe_title}.mp4"
-                        try:
-                            if legacy_video_path.exists() and not project_video_path.exists():
-                                import shutil
-                                shutil.copy2(legacy_video_path, project_video_path)
-                                logger.info(f"迁移旧切片文件到项目目录: {legacy_video_path} -> {project_video_path}")
-                        except Exception as _e:
-                            logger.warning(f"迁移旧切片文件失败: {legacy_video_path} -> {project_video_path}: {_e}")
+                        # 跳过旧目录检查
                         
                         # 始终使用项目内路径
                         video_path = str(project_video_path)
@@ -238,7 +230,7 @@ class DataSyncService:
                     title = clip_data.get('generated_title', clip_data.get('title', clip_data.get('outline', '')))
                     
                     # 强制使用项目内路径
-                    from ..core.path_utils import get_project_directory, get_data_directory
+                    from backend.core.path_utils import get_project_directory
                     project_dir = get_project_directory(project_id)
                     project_clips_dir = project_dir / "output" / "clips"
                     project_clips_dir.mkdir(parents=True, exist_ok=True)
@@ -257,19 +249,7 @@ class DataSyncService:
                         safe_title = safe_title.replace(' ', '_')
                         project_video_path = project_clips_dir / f"{clip_id}_{safe_title}.mp4"
                     
-                    # 兼容旧的全局输出目录，如果存在则迁移到项目目录
-                    global_clips_dir = get_data_directory() / "output" / "clips"
-                    if actual_filename:
-                        global_video_path = global_clips_dir / actual_filename
-                    else:
-                        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                        safe_title = safe_title.replace(' ', '_')
-                        global_video_path = global_clips_dir / f"{clip_id}_{safe_title}.mp4"
-                    
-                    if global_video_path.exists() and not project_video_path.exists():
-                        import shutil
-                        shutil.copy2(global_video_path, project_video_path)
-                        logger.info(f"将切片文件从全局目录迁移到项目目录: {global_video_path} -> {project_video_path}")
+                    # 兼容旧的全局输出目录，跳过
                     
                     # 始终使用项目内路径
                     video_path = str(project_video_path)
@@ -366,7 +346,7 @@ class DataSyncService:
                     # 检查合集是否已存在
                     existing_collection = self.db.query(Collection).filter(
                         Collection.project_id == project_id,
-                        Collection.name == collection_title
+                        Collection.collection_title == collection_title
                     ).first()
                     
                     if existing_collection:
@@ -385,7 +365,7 @@ class DataSyncService:
                         f"collection_{collection_id}.mp4"
                     ]
                     
-                    from ..core.path_utils import get_project_directory, get_data_directory
+                    from backend.core.path_utils import get_project_directory
                     project_dir = get_project_directory(project_id)
                     project_collections_dir = project_dir / "output" / "collections"
                     project_collections_dir.mkdir(parents=True, exist_ok=True)
@@ -399,17 +379,7 @@ class DataSyncService:
                             break
                     
                     # 如果项目目录中没找到，尝试全局目录并迁移
-                    if not video_path:
-                        for filename in possible_filenames:
-                            legacy_video_path = get_data_directory() / "output" / "collections" / filename
-                            if legacy_video_path.exists():
-                                # 迁移到项目目录
-                                project_video_path = project_collections_dir / filename
-                                import shutil
-                                shutil.copy2(legacy_video_path, project_video_path)
-                                video_path = str(project_video_path)
-                                logger.info(f"将合集文件从全局目录迁移到项目目录: {legacy_video_path} -> {project_video_path}")
-                                break
+                    # 跳过旧目录
                     
                     # 如果还是没找到，使用项目内路径（文件可能还未生成）
                     if not video_path:
@@ -439,10 +409,9 @@ class DataSyncService:
                     if not collection:
                         collection = Collection(
                             project_id=project_id,
-                            name=collection_title,
-                            description=collection_data.get('collection_summary', ''),
-                            video_path=video_path,
-                            export_path=video_path,  # 设置export_path
+                            collection_title=collection_title,
+                            collection_summary=collection_data.get('collection_summary', ''),
+                            collection_type='ai_recommended',
                             collection_metadata={
                                 'clip_ids': uuid_clip_ids,  # 使用UUID格式的clip_ids
                                 'original_clip_ids': original_clip_ids,  # 保留原始数字ID
@@ -465,8 +434,7 @@ class DataSyncService:
                             'collection_type': 'ai_recommended',
                             'original_id': collection_id
                         })
-                        collection.video_path = video_path
-                        collection.export_path = video_path  # 设置export_path
+                        collection.collection_type = 'ai_recommended'
                         logger.info(f"更新现有合集: {collection.id}")
                     
                     # 建立合集和切片的关联关系
@@ -617,7 +585,7 @@ class DataSyncService:
                 # 检查是否已存在
                 existing_collection = self.db.query(Collection).filter(
                     Collection.project_id == project_id,
-                    Collection.name == collection_data.get("collection_title")
+                    Collection.collection_title == collection_data.get("collection_title")
                 ).first()
                 
                 if existing_collection:
@@ -627,11 +595,10 @@ class DataSyncService:
                 # 创建新的collection记录
                 collection = Collection(
                     project_id=project_id,
-                    name=collection_data.get("collection_title", ""),
-                    description=collection_data.get("collection_summary", ""),
-                    theme="default",
+                    collection_title=collection_data.get("collection_title", ""),
+                    collection_summary=collection_data.get("collection_summary", ""),
+                    collection_type="ai_recommended",
                     status=CollectionStatus.COMPLETED,
-                    tags=[],
                     collection_metadata={
                         "clip_ids": collection_data.get("clip_ids", []),
                         "original_id": collection_data.get("id"),
@@ -641,7 +608,7 @@ class DataSyncService:
                 
                 self.db.add(collection)
                 collections_count += 1
-                logger.info(f"创建collection: {collection.name}")
+                logger.info(f"创建collection: {collection.collection_title}")
             
             self.db.commit()
             logger.info(f"同步了 {collections_count} 个collections")

@@ -87,13 +87,26 @@ class VideoGenerator:
                         clip['start_time'] = clip_data['start_time']
                     if 'end_time' in clip_data:
                         clip['end_time'] = clip_data['end_time']
-                    # 优先使用从视频获取的实际时长（静音处理后的），否则用时间差计算
+                    
+                    # 计算 duration - 优先用视频实际时长，如果获取失败则用时间差计算
+                    start_sec = self._time_to_seconds(clip['start_time'])
+                    end_sec = self._time_to_seconds(clip['end_time'])
+                    calculated_duration = end_sec - start_sec
+                    
+                    # 检查实际视频时长
                     if clip_data.get('duration', 0) > 0:
+                        # 优先使用实际视频时长，但确保在合理范围内
                         clip['duration'] = clip_data['duration']
+                        logger.debug(f"切片 {clip['id']}: 使用实际视频时长 {clip['duration']:.3f}s")
                     else:
-                        start_sec = self._time_to_seconds(clip['start_time'])
-                        end_sec = self._time_to_seconds(clip['end_time'])
-                        clip['duration'] = end_sec - start_sec
+                        # 如果没有实际时长，使用计算的时长
+                        clip['duration'] = calculated_duration
+                        logger.debug(f"切片 {clip['id']}: 使用计算时长 {calculated_duration:.3f}s")
+                    
+                    # 确保 duration 是正数
+                    if clip['duration'] <= 0:
+                        clip['duration'] = max(1.0, calculated_duration)  # 至少1秒
+                        logger.warning(f"切片 {clip['id']}: 修正时长为 {clip['duration']:.3f}s")
                     break
         
         logger.info(f"切片视频生成完成，共{len(successful_clips)}个切片")
@@ -201,6 +214,7 @@ class VideoGenerator:
         Note:
             此方法保存的是最终的切片元数据，包含视频生成后的完整信息。
             与step4的step4_titles.json不同，这里保存的是用于前端展示的最终数据。
+            确保同时保存 final_score 和 score 两个字段，保证兼容性。
         """
         if output_path is None:
             output_path = self.metadata_dir / "clips_metadata.json"
@@ -208,11 +222,45 @@ class VideoGenerator:
         # 确保目录存在
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
+        # 处理数据：确保同时有 final_score 和 score 两个字段，并且处理 recommend_reason
+        processed_clips = []
+        for clip in clips_with_titles:
+            # 复制原数据
+            processed_clip = clip.copy()
+            
+            # 处理评分字段：确保同时有 final_score 和 score
+            if 'final_score' in clip:
+                processed_clip['score'] = clip['final_score']
+            elif 'score' in clip:
+                processed_clip['final_score'] = clip['score']
+            else:
+                # 如果都没有，设置默认值
+                processed_clip['final_score'] = 0.0
+                processed_clip['score'] = 0.0
+            
+            # 处理推荐理由字段
+            if 'recommend_reason' in clip and clip['recommend_reason']:
+                processed_clip['description'] = clip['recommend_reason']
+            elif 'description' in clip and clip['description']:
+                processed_clip['recommend_reason'] = clip['description']
+            
+            # 确保 content 字段存在（用于前端显示）
+            if 'content' not in processed_clip:
+                outline = processed_clip.get('outline', '')
+                if isinstance(outline, dict):
+                    outline_text = outline.get('title', '') or outline.get('content', '')
+                else:
+                    outline_text = str(outline)
+                
+                processed_clip['content'] = outline_text
+            
+            processed_clips.append(processed_clip)
+        
         # 保存数据
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(clips_with_titles, f, ensure_ascii=False, indent=2)
+            json.dump(processed_clips, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"切片元数据已保存到: {output_path}")
+        logger.info(f"切片元数据已保存到: {output_path}, 包含 {len(processed_clips)} 个切片")
         return output_path
     
     def save_collection_metadata(self, collections_data: List[Dict], output_path: Optional[Path] = None) -> Path:

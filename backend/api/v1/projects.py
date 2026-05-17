@@ -11,13 +11,19 @@ from backend.core.database import get_db
 from backend.services.project_service import ProjectService
 from backend.services.processing_service import ProcessingService
 from backend.services.websocket_notification_service import WebSocketNotificationService
-from backend.tasks.processing import process_video_pipeline
+from backend.utils.task_submission_utils import submit_video_pipeline_task
 from backend.core.websocket_manager import manager as websocket_manager
 from backend.schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse, ProjectFilter,
     ProjectType, ProjectStatus
 )
 from backend.schemas.base import PaginationParams
+
+# 导入所有模型以确保 SQLAlchemy 关系配置正确
+from backend.models.project import Project
+from backend.models.clip import Clip
+from backend.models.task import Task
+from backend.models.collection import Collection
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,7 +63,7 @@ async def upload_files(
         if srt_file and not srt_file.filename.lower().endswith('.srt'):
             raise HTTPException(status_code=400, detail="Invalid subtitle file format")
         
-        # 创建项目数据
+        # 创建项目数据（先不保存到数据库）
         subtitle_info = srt_file.filename if srt_file else "Whisper自动生成"
         project_data = ProjectCreate(
             name=project_name,
@@ -73,19 +79,48 @@ async def upload_files(
             }
         )
         
-        # 创建项目
-        project = project_service.create_project(project_data)
-        
-        # 保存文件到项目目录
-        project_id = str(project.id)
+        # 先创建项目目录并保存文件，再创建数据库记录
+        # 这样可以避免文件保存失败时数据库中留下无效记录
         from backend.core.path_utils import get_project_raw_directory
+        import uuid
+        
+        # 生成项目ID
+        project_id = str(uuid.uuid4())
         raw_dir = get_project_raw_directory(project_id)
+        
+        # 确保目录存在
+        raw_dir.mkdir(parents=True, exist_ok=True)
         
         # 保存视频文件
         video_path = raw_dir / "input.mp4"
-        with open(video_path, "wb") as f:
-            content = await video_file.read()
-            f.write(content)
+        try:
+            with open(video_path, "wb") as f:
+                content = await video_file.read()
+                f.write(content)
+        except Exception as e:
+            logger.error(f"保存视频文件失败: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save video file: {str(e)}")
+        
+        # 处理字幕文件（如果用户提供了）
+        srt_path = None
+        if srt_file:
+            # 用户提供了字幕文件
+            srt_path = raw_dir / "input.srt"
+            try:
+                with open(srt_path, "wb") as f:
+                    content = await srt_file.read()
+                    f.write(content)
+                logger.info(f"用户提供的字幕文件已保存: {srt_path}")
+            except Exception as e:
+                logger.error(f"保存字幕文件失败: {e}")
+                # 删除已保存的视频文件
+                import os
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                raise HTTPException(status_code=500, detail=f"Failed to save subtitle file: {str(e)}")
+        
+        # 文件保存成功后，再创建数据库记录
+        project = project_service.create_project(project_data, project_id=project_id)
         
         # 更新项目的视频路径
         project.video_path = str(video_path)
@@ -94,27 +129,30 @@ async def upload_files(
         # 立即生成缩略图（同步处理）
         try:
             from backend.utils.thumbnail_generator import generate_project_thumbnail
+            from pathlib import Path
             logger.info(f"开始为项目 {project_id} 生成缩略图...")
-            thumbnail_data = generate_project_thumbnail(project_id, video_path)
-            if thumbnail_data:
-                project.thumbnail = thumbnail_data
+            
+            # 定义缩略图输出路径
+            thumbnail_output = raw_dir / "thumbnail.jpg"
+            
+            # 正确的参数顺序：video_path, output_path, project_id
+            success = generate_project_thumbnail(
+                video_path=str(video_path),
+                output_path=str(thumbnail_output),
+                project_id=project_id
+            )
+            
+            if success:
+                project.thumbnail = str(thumbnail_output)
                 project_service.db.commit()
                 logger.info(f"项目 {project_id} 缩略图生成并保存成功")
             else:
                 logger.warning(f"项目 {project_id} 缩略图生成失败")
         except Exception as e:
             logger.error(f"生成项目缩略图时发生错误: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
             # 缩略图生成失败不影响主流程，会在异步任务中重试
-        
-        # 处理字幕文件（如果用户提供了）
-        srt_path = None
-        if srt_file:
-            # 用户提供了字幕文件
-            srt_path = raw_dir / "input.srt"
-            with open(srt_path, "wb") as f:
-                content = await srt_file.read()
-                f.write(content)
-            logger.info(f"用户提供的字幕文件已保存: {srt_path}")
         
         # 启动异步处理任务
         try:
@@ -209,7 +247,7 @@ async def get_projects(
 ):
     """Get paginated projects with optional filtering."""
     try:
-        pagination = PaginationParams(page=page, size=size)
+        pagination = PaginationParams(page=page, page_size=size)
         
         filters = None
         if status or project_type or search:
@@ -293,17 +331,17 @@ async def update_project(
             id=str(project_id),  # Keep as string for UUID
             name=project_data.name or "Updated Project",
             description=project_data.description,
-            project_type=ProjectType.DEFAULT,  # Use enum
-            status=ProjectStatus.PENDING,  # Use enum
-            source_url=None,
-            source_file=None,
+            project_type=project.project_type,
+            status=project.status,
+            source_url=project.project_metadata.get("source_url") if project.project_metadata else None,
+            source_file=project.video_path,
             settings=project_data.settings or {},
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            completed_at=None,
-            total_clips=0,
-            total_collections=0,
-            total_tasks=0
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+            completed_at=project.completed_at,
+            total_clips=project.total_clips,
+            total_collections=project.total_collections,
+            total_tasks=project.total_tasks
         )
     except HTTPException:
         raise
@@ -600,8 +638,8 @@ async def retry_processing(
         # 字幕文件是可选的
         srt_path_str = str(srt_path) if srt_path.exists() else None
         
-        # 提交Celery任务 - 使用字符串类型的project_id
-        celery_task = process_video_pipeline.delay(
+        # 提交视频处理任务（使用简化任务提交器）
+        task_result = submit_video_pipeline_task(
             project_id=project_id,
             input_video_path=str(video_path),
             input_srt_path=srt_path_str
@@ -609,20 +647,20 @@ async def retry_processing(
         
         # 创建新的处理任务记录
         from backend.models.task import TaskType
-        task_result = processing_service._create_processing_task(
+        processing_task = processing_service._create_processing_task(
             project_id=project_id,
             task_type=TaskType.VIDEO_PROCESSING
         )
         
-        # 更新任务的Celery任务ID
-        task_result.celery_task_id = celery_task.id
+        # 更新任务ID
+        processing_task.celery_task_id = task_result.get('task_id', '')
         processing_service.db.commit()
         
         return {
             "message": "Processing retry started successfully",
             "project_id": project_id,
-            "task_id": task_result.id,
-            "celery_task_id": celery_task.id,
+            "task_id": processing_task.id,
+            "celery_task_id": task_result.get('task_id', ''),
             "status": "processing"
         }
         
@@ -836,13 +874,13 @@ async def generate_project_thumbnail(
         raise HTTPException(status_code=500, detail=f"生成缩略图失败: {str(e)}")
 
 
-@router.get("/{project_id}/files/{filename}")
+@router.get("/{project_id}/files/{filepath:path}")
 async def get_project_file(
     project_id: str,
-    filename: str,
+    filepath: str,
     project_service: ProjectService = Depends(get_project_service)
 ):
-    """Get a project file by filename."""
+    """Get a project file by filepath (supports nested paths like 'input/file.mp4')."""
     try:
         from pathlib import Path
         import json
@@ -852,43 +890,40 @@ async def get_project_file(
         from backend.core.path_utils import get_project_directory
         project_root = get_project_directory(project_id)
         
-        # 尝试多个可能的路径
-        possible_paths = [
-            project_root / "raw" / filename,  # 原始文件
-            project_root / "metadata" / filename,  # 元数据文件
-            project_root / filename,  # 直接在项目根目录
-        ]
+        # filepath 已经包含完整路径，如 "input/input.mp4"
+        file_path = project_root / filepath
         
-        file_path = None
-        for path in possible_paths:
-            if path.exists():
-                file_path = path
-                break
-        
-        if not file_path:
-            raise HTTPException(status_code=404, detail="File not found")
+        if not file_path.exists():
+            # 尝试在 raw 目录下查找
+            raw_path = project_root / "raw" / filepath
+            if raw_path.exists():
+                file_path = raw_path
+            else:
+                logger.error(f"文件不存在: {file_path}, raw路径: {raw_path}")
+                raise HTTPException(status_code=404, detail="File not found")
         
         # 根据文件类型返回不同响应
-        if filename.endswith('.json'):
+        if filepath.endswith('.json'):
             # JSON文件返回数据
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return data
         else:
             # 其他文件（如视频）返回文件流
-            media_type = "video/mp4" if filename.endswith('.mp4') else "application/octet-stream"
+            media_type = "video/mp4" if filepath.endswith('.mp4') else "application/octet-stream"
             return FileResponse(
                 path=str(file_path),
-                filename=filename,
+                filename=Path(filepath).name,
                 media_type=media_type,
                 headers={
-                    "Accept-Ranges": "bytes",  # 支持范围请求，便于视频播放
-                    "Cache-Control": "public, max-age=3600"  # 缓存1小时
+                    "Accept-Ranges": "bytes",
+                    "Cache-Control": "public, max-age=3600"
                 }
             )
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"获取项目文件失败: {e}")
         raise HTTPException(status_code=400, detail=str(e)) 
 
 

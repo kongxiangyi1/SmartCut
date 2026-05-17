@@ -3,16 +3,13 @@
 """
 
 import logging
-from typing import Dict, Any, Optional, Callable
+from datetime import datetime
+from typing import Dict, Any, Optional
 from pathlib import Path
+import json
+import asyncio
 
 from backend.services.simple_progress import emit_progress, clear_progress
-from backend.pipeline.step1_outline import run_step1_outline
-from backend.pipeline.step2_timeline import run_step2_timeline
-from backend.pipeline.step3_scoring import run_step3_scoring
-from backend.pipeline.step4_title import run_step4_title
-from backend.pipeline.step5_clustering import run_step5_clustering
-from backend.pipeline.step6_video import run_step6_video
 
 logger = logging.getLogger(__name__)
 
@@ -23,98 +20,7 @@ class SimplePipelineAdapter:
     def __init__(self, project_id: str, task_id: str):
         self.project_id = project_id
         self.task_id = task_id
-        
-    async def _generate_subtitle_automatically(self, video_path: str, metadata_dir: Path) -> Path:
-        """
-        自动生成字幕文件 - 优化版本
-
-        降级策略（按准确度和内存综合排序）：
-        1. FunASR Paraformer-zh（推荐，最准确、内存最低 ~1GB）
-        2. Whisper Small（多语言、内存适中 ~3GB）
-        3. bcut-asr（快速备用）
-        4. 返回 None（使用空大纲）
-
-        Args:
-            video_path: 视频文件路径
-            metadata_dir: 元数据目录
-
-        Returns:
-            生成的SRT文件路径，如果失败返回None
-        """
-        from backend.utils.speech_recognizer import generate_subtitle_for_video
-
-        video_file_path = Path(video_path)
-        if not video_file_path.exists():
-            logger.error(f"视频文件不存在: {video_path}")
-            return None
-
-        output_path = metadata_dir / f"{video_file_path.stem}.srt"
-
-        logger.info(f"开始为视频 {video_path} 自动生成字幕")
-        logger.info(f"降级策略: FunASR → Whisper Small → bcut-asr → 空字幕")
-
-        # 更新进度
-        emit_progress(self.project_id, "SUBTITLE", "正在使用AI生成字幕...", subpercent=10)
-
-        # 方案1: FunASR Paraformer-zh（最推荐）
-        try:
-            logger.info("尝试使用 FunASR (Paraformer-zh) 生成字幕...")
-            emit_progress(self.project_id, "SUBTITLE", "正在使用FunASR生成字幕...", subpercent=15)
-            srt_path = generate_subtitle_for_video(
-                video_file_path,
-                output_path=output_path,
-                method="funasr",
-                model="paraformer-zh",
-                language="zh"
-            )
-            if srt_path and srt_path.exists():
-                logger.info(f"✅ FunASR 字幕生成成功: {srt_path}")
-                emit_progress(self.project_id, "SUBTITLE", "FunASR字幕生成完成", subpercent=40)
-                return srt_path
-        except Exception as e:
-            logger.warning(f"⚠️ FunASR 生成失败: {e}")
-
-        # 方案2: Whisper Small（内存友好）
-        try:
-            logger.info("尝试使用 Whisper Small 生成字幕...")
-            emit_progress(self.project_id, "SUBTITLE", "正在使用Whisper生成字幕...", subpercent=20)
-            srt_path = generate_subtitle_for_video(
-                video_file_path,
-                output_path=output_path,
-                method="whisper_local",
-                model="small",
-                language="auto"
-            )
-            if srt_path and srt_path.exists():
-                logger.info(f"✅ Whisper Small 字幕生成成功: {srt_path}")
-                emit_progress(self.project_id, "SUBTITLE", "Whisper字幕生成完成", subpercent=40)
-                return srt_path
-        except Exception as e:
-            logger.warning(f"⚠️ Whisper Small 生成失败: {e}")
-
-        # 方案3: bcut-asr（备用快速方案）
-        try:
-            logger.info("尝试使用 bcut-asr 生成字幕...")
-            emit_progress(self.project_id, "SUBTITLE", "正在使用bcut-asr生成字幕...", subpercent=25)
-            srt_path = generate_subtitle_for_video(
-                video_file_path,
-                output_path=output_path,
-                method="bcut_asr",
-                model="base",
-                language="auto"
-            )
-            if srt_path and srt_path.exists():
-                logger.info(f"✅ bcut-asr 字幕生成成功: {srt_path}")
-                emit_progress(self.project_id, "SUBTITLE", "bcut-asr字幕生成完成", subpercent=40)
-                return srt_path
-        except Exception as e:
-            logger.warning(f"⚠️ bcut-asr 生成失败: {e}")
-
-        # 全部失败
-        logger.error("❌ 所有字幕生成方案均失败，将使用空字幕")
-        emit_progress(self.project_id, "SUBTITLE", "字幕生成失败，使用空字幕", subpercent=40)
-        return None
-        
+    
     async def process_project_sync(self, input_video_path: str, input_srt_path: str) -> Dict[str, Any]:
         """
         同步处理项目 - 使用简化的进度系统
@@ -132,16 +38,14 @@ class SimplePipelineAdapter:
             # 清除之前的进度数据
             clear_progress(self.project_id)
             
-            # 创建必要的目录结构 - 使用正确的路径
-            from backend.core.path_utils import get_project_directory
-            project_dir = get_project_directory(self.project_id)
+            # 创建必要的目录结构
+            from backend.core.path_utils import get_project_directory, ensure_project_dirs
+            project_dir = ensure_project_dirs(self.project_id)
             metadata_dir = project_dir / "metadata"
-            output_dir = project_dir / "output"
+            clips_output_dir = project_dir / "output" / "clips"
+            collections_output_dir = project_dir / "output" / "collections"
+            
             metadata_dir.mkdir(parents=True, exist_ok=True)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            # 项目内专属输出子目录
-            clips_output_dir = output_dir / "clips"
-            collections_output_dir = output_dir / "collections"
             clips_output_dir.mkdir(parents=True, exist_ok=True)
             collections_output_dir.mkdir(parents=True, exist_ok=True)
             
@@ -151,124 +55,172 @@ class SimplePipelineAdapter:
             # 阶段2: 字幕处理
             emit_progress(self.project_id, "SUBTITLE", "开始字幕处理")
             
+            # 导入流水线步骤
+            try:
+                from backend.pipeline.step1_outline import run_step1_outline
+                from backend.pipeline.step2_timeline import run_step2_timeline
+                from backend.pipeline.step3_scoring import run_step3_scoring
+                from backend.pipeline.step4_title import run_step4_title
+                from backend.pipeline.step5_clustering import run_step5_clustering
+                from backend.pipeline.step6_video import run_step6_video
+            except ImportError as e:
+                logger.error(f"无法导入流水线模块: {e}")
+                raise Exception(f"无法导入流水线模块: {e}")
+            
             # Step 1: 大纲提取
-            logger.info("执行Step 1: 大纲提取")
-            if input_srt_path and Path(input_srt_path).exists():
-                logger.info(f"使用现有SRT文件: {input_srt_path}")
-                outlines = run_step1_outline(Path(input_srt_path), metadata_dir=metadata_dir)
-            else:
-                logger.warning("没有SRT文件，尝试自动生成字幕")
-                # 尝试自动生成字幕
-                srt_path = await self._generate_subtitle_automatically(input_video_path, metadata_dir)
-                if srt_path and srt_path.exists():
-                    logger.info(f"自动生成字幕成功: {srt_path}")
-                    outlines = run_step1_outline(srt_path, metadata_dir=metadata_dir)
-                else:
-                    logger.warning("自动生成字幕失败，创建空大纲")
-                    # 创建一个空的大纲文件
-                    outlines = []
-                    outline_file = metadata_dir / "step1_outline.json"
-                    import json
-                    with open(outline_file, 'w', encoding='utf-8') as f:
-                        json.dump(outlines, f, ensure_ascii=False, indent=2)
-            emit_progress(self.project_id, "SUBTITLE", "字幕处理完成", subpercent=50)
-            
-            # 阶段3: 内容分析
-            emit_progress(self.project_id, "ANALYZE", "开始内容分析")
-            
-            # Step 2: 时间线提取
-            logger.info("执行Step 2: 时间线提取")
-            if outlines:  # 只有当有大纲时才执行后续步骤
-                timeline_data = run_step2_timeline(
-                    metadata_dir / "step1_outline.json",
-                    metadata_dir=metadata_dir
-                )
-                emit_progress(self.project_id, "ANALYZE", "时间线提取完成", subpercent=50)
+            emit_progress(self.project_id, "SUBTITLE", "正在提取内容大纲...", subpercent=10)
+            step1_output = metadata_dir / "step1_outline.json"
+            try:
+                srt_path = Path(input_srt_path) if input_srt_path else None
                 
-                # Step 3: 内容评分
-                logger.info("执行Step 3: 内容评分")
-                scored_clips = run_step3_scoring(
-                    metadata_dir / "step2_timeline.json",
-                    metadata_dir=metadata_dir
-                )
-                emit_progress(self.project_id, "ANALYZE", "内容分析完成", subpercent=100)
-            else:
-                logger.warning("没有大纲数据，跳过时间线提取和内容评分")
-                # 创建空的时间线和评分文件
-                timeline_file = metadata_dir / "step2_timeline.json"
-                scored_file = metadata_dir / "step3_high_score_clips.json"
-                import json
-                with open(timeline_file, 'w', encoding='utf-8') as f:
-                    json.dump([], f, ensure_ascii=False, indent=2)
-                with open(scored_file, 'w', encoding='utf-8') as f:
-                    json.dump([], f, ensure_ascii=False, indent=2)
-                # 初始化空变量
-                timeline_data = []
-                scored_clips = []
-                emit_progress(self.project_id, "ANALYZE", "内容分析完成", subpercent=100)
+                # 如果没有字幕文件，尝试自动生成
+                if not srt_path or not srt_path.exists():
+                    logger.info("未找到字幕文件，尝试自动生成...")
+                    emit_progress(self.project_id, "SUBTITLE", "正在生成字幕文件...", subpercent=5)
+                    
+                    try:
+                        from backend.utils.speech_recognizer import generate_subtitle_for_video
+                        
+                        # 生成的字幕文件保存到项目目录
+                        srt_path = project_dir / "raw" / "subtitle.srt"
+                        srt_path.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        # 自动生成字幕
+                        logger.info(f"开始为视频生成字幕: {input_video_path}")
+                        generated_srt = generate_subtitle_for_video(
+                            video_path=Path(input_video_path),
+                            output_path=srt_path,
+                            method="auto",
+                            language="auto"
+                        )
+                        
+                        if generated_srt and generated_srt.exists():
+                            logger.info(f"字幕文件生成成功: {generated_srt}")
+                            srt_path = generated_srt
+                        else:
+                            raise Exception("字幕生成失败")
+                            
+                    except Exception as asr_error:
+                        logger.error(f"自动生成字幕失败: {asr_error}")
+                        raise Exception(f"缺少字幕文件，且自动生成失败: {asr_error}")
+                
+                # 现在应该有字幕文件了，执行Step 1
+                if srt_path and srt_path.exists():
+                    outlines = run_step1_outline(
+                        srt_path=srt_path, 
+                        metadata_dir=metadata_dir, 
+                        output_path=step1_output
+                    )
+                else:
+                    raise Exception("缺少字幕文件")
+            except Exception as e:
+                logger.error(f"Step1失败: {e}")
+                raise Exception(f"大纲提取失败: {e}")
             
-            # 阶段4: 片段定位
-            emit_progress(self.project_id, "HIGHLIGHT", "开始片段定位")
+            # Step 2: 时间线分析
+            emit_progress(self.project_id, "SUBTITLE", "正在分析时间线...", subpercent=30)
+            step2_output = metadata_dir / "step2_timeline.json"
+            try:
+                timeline_data = run_step2_timeline(
+                    outline_path=step1_output, 
+                    metadata_dir=metadata_dir, 
+                    output_path=step2_output
+                )
+            except Exception as e:
+                logger.error(f"Step2失败: {e}")
+                raise Exception(f"时间线分析失败: {e}")
+            
+            # Step 3: 精彩评分
+            emit_progress(self.project_id, "ANALYZE", "正在进行内容评分...", subpercent=50)
+            step3_output = metadata_dir / "step3_high_score_clips.json"
+            try:
+                scored_clips = run_step3_scoring(
+                    timeline_path=step2_output, 
+                    metadata_dir=metadata_dir, 
+                    output_path=step3_output
+                )
+            except Exception as e:
+                logger.error(f"Step3失败: {e}")
+                raise Exception(f"精彩评分失败: {e}")
             
             # Step 4: 标题生成
-            logger.info("执行Step 4: 标题生成")
-            if outlines:  # 只有当有大纲时才执行后续步骤
-                titled_clips = run_step4_title(
-                    metadata_dir / "step3_high_score_clips.json",
-                    metadata_dir=str(metadata_dir)
+            emit_progress(self.project_id, "ANALYZE", "正在生成片段标题...", subpercent=70)
+            step4_output = metadata_dir / "step4_titles.json"
+            try:
+                clips_with_titles = await run_step4_title(
+                    project_id=self.project_id,
+                    metadata_dir=metadata_dir,
+                    clips=scored_clips
                 )
-                emit_progress(self.project_id, "HIGHLIGHT", "标题生成完成", subpercent=40)
-                
-                # Step 5: 主题聚类
-                logger.info("执行Step 5: 主题聚类")
-                collections = run_step5_clustering(
-                    metadata_dir / "step4_titles.json",
-                    metadata_dir=str(metadata_dir)
+            except Exception as e:
+                logger.error(f"Step4失败: {e}")
+                raise Exception(f"标题生成失败: {e}")
+            
+            # Step 5: 主题聚类
+            emit_progress(self.project_id, "HIGHLIGHT", "正在进行主题聚类...", subpercent=85)
+            step5_output = metadata_dir / "step5_clusters.json"
+            try:
+                collections = await run_step5_clustering(
+                    project_id=self.project_id,
+                    metadata_dir=metadata_dir,
+                    clips=clips_with_titles
                 )
-                emit_progress(self.project_id, "HIGHLIGHT", "片段定位完成", subpercent=100)
-                
-                # 阶段5: 视频导出
-                emit_progress(self.project_id, "EXPORT", "开始视频导出")
-                
-                # Step 6: 视频切割
-                logger.info("执行Step 6: 视频切割")
+            except Exception as e:
+                logger.error(f"Step5失败: {e}")
+                raise Exception(f"主题聚类失败: {e}")
+            
+            # Step 6: 视频生成
+            emit_progress(self.project_id, "EXPORT", "正在生成视频片段...", subpercent=100)
+            
+            try:
                 video_result = run_step6_video(
-                    metadata_dir / "step4_titles.json",
-                    metadata_dir / "step5_collections.json",
-                    input_video_path,
-                    output_dir=output_dir,
+                    clips_with_titles_path=step4_output,
+                    collections_path=step5_output,
+                    input_video=Path(input_video_path),
+                    output_dir=project_dir / "output",
                     clips_dir=str(clips_output_dir),
                     collections_dir=str(collections_output_dir),
-                    metadata_dir=str(metadata_dir)
+                    metadata_dir=str(metadata_dir),
+                    srt_path=Path(input_srt_path) if input_srt_path and Path(input_srt_path).exists() else None,
+                    use_smart_clips=False
                 )
-            else:
-                logger.warning("没有大纲数据，跳过标题生成、主题聚类和视频切割")
-                # 创建空的标题和合集文件
-                titles_file = metadata_dir / "step4_titles.json"
-                collections_file = metadata_dir / "step5_collections.json"
-                import json
-                with open(titles_file, 'w', encoding='utf-8') as f:
-                    json.dump([], f, ensure_ascii=False, indent=2)
-                with open(collections_file, 'w', encoding='utf-8') as f:
-                    json.dump([], f, ensure_ascii=False, indent=2)
-                # 初始化空变量
-                titled_clips = []
-                collections = []
-                emit_progress(self.project_id, "HIGHLIGHT", "片段定位完成", subpercent=100)
-                emit_progress(self.project_id, "EXPORT", "开始视频导出")
-                video_result = {"status": "skipped", "message": "没有内容可处理"}
+                
+                logger.info(f"视频生成完成: {video_result}")
+            except Exception as e:
+                error_msg = f"视频生成失败: {e}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(f"详细错误信息:\n{traceback.format_exc()}")
+                emit_progress(self.project_id, "EXPORT", error_msg, subpercent=0)
+                raise Exception(error_msg)
+            
             emit_progress(self.project_id, "EXPORT", "视频导出完成", subpercent=100)
             
             # 阶段6: 处理完成
             emit_progress(self.project_id, "DONE", "处理完成")
             
-            # 自动同步数据到数据库
+            # 更新项目状态为完成
             try:
-                from backend.services.data_sync_service import DataSyncService
                 from backend.core.database import SessionLocal
+                from backend.models.project import Project
                 
                 db = SessionLocal()
                 try:
+                    from backend.services.project_service import ProjectService
+                    project_service = ProjectService(db)
+                    project = project_service.get(self.project_id)
+                    if project:
+                        project_service.update(
+                            self.project_id,
+                            status="completed",
+                            progress=100.0,
+                            current_step=6
+                        )
+                        db.commit()
+                        logger.info(f"项目 {self.project_id} 状态已更新为 completed")
+                    
+                    # 自动同步数据到数据库
+                    from backend.services.data_sync_service import DataSyncService
                     sync_service = DataSyncService(db)
                     sync_result = sync_service.sync_project_from_filesystem(self.project_id, project_dir)
                     if sync_result.get("success"):
@@ -278,36 +230,64 @@ class SimplePipelineAdapter:
                 finally:
                     db.close()
             except Exception as e:
-                logger.error(f"数据同步失败: {e}")
+                logger.error(f"更新项目状态和同步数据失败: {e}")
             
             logger.info(f"项目处理完成: {self.project_id}")
+            
+            # 从生成结果中获取元数据
+            clips_metadata_path = metadata_dir / "clips_metadata.json"
+            clips_metadata = []
+            if clips_metadata_path.exists():
+                with open(clips_metadata_path, 'r', encoding='utf-8') as f:
+                    clips_metadata = json.load(f)
+            
+            collections_metadata_path = metadata_dir / "collections_metadata.json"
+            collections_metadata = []
+            if collections_metadata_path.exists():
+                with open(collections_metadata_path, 'r', encoding='utf-8') as f:
+                    collections_metadata = json.load(f)
+            
             return {
-                "status": "succeeded",
+                "status": "success",
                 "project_id": self.project_id,
                 "task_id": self.task_id,
-                "result": {
-                    "outlines": outlines,
-                    "timeline": timeline_data,
-                    "scored_clips": scored_clips,
-                    "titled_clips": titled_clips,
-                    "collections": collections,
-                    "video_result": video_result
-                }
+                "clips_metadata": clips_metadata,
+                "collections_metadata": collections_metadata
             }
             
         except Exception as e:
+            import traceback
             error_msg = f"流水线处理失败: {str(e)}"
             logger.error(error_msg)
+            logger.error(f"堆栈: {traceback.format_exc()}")
+            
+            # 更新项目状态为失败
+            try:
+                from backend.core.database import SessionLocal
+                from backend.models.project import Project
+                
+                db = SessionLocal()
+                try:
+                    from backend.services.project_service import ProjectService
+                    project_service = ProjectService(db)
+                    project = project_service.get(self.project_id)
+                    if project:
+                        project_service.update(
+                            self.project_id,
+                            status="failed",
+                            error_message=str(e)
+                        )
+                        db.commit()
+                        logger.info(f"项目 {self.project_id} 状态已更新为 failed")
+                finally:
+                    db.close()
+            except Exception as update_e:
+                logger.error(f"更新项目失败状态失败: {update_e}")
             
             # 发送失败状态
             emit_progress(self.project_id, "DONE", f"处理失败: {error_msg}")
             
-            return {
-                "status": "failed",
-                "project_id": self.project_id,
-                "task_id": self.task_id,
-                "error": error_msg
-            }
+            raise Exception(error_msg)
 
 
 def create_simple_pipeline_adapter(project_id: str, task_id: str) -> SimplePipelineAdapter:

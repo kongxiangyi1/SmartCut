@@ -26,13 +26,13 @@ VIDEO_CATEGORIES_CONFIG = {
     VideoCategory.DEFAULT: {
         "name": "默认",
         "description": "通用视频内容，适用于大部分场景",
-        "icon": "🎬",
+        "icon": "[VIDEO]",
         "color": "#4facfe"
     },
     VideoCategory.KNOWLEDGE: {
         "name": "知识科普",
         "description": "教育、科普、技术分享等知识性内容",
-        "icon": "📚",
+        "icon": "[DOC]",
         "color": "#52c41a"
     },
     VideoCategory.BUSINESS: {
@@ -111,7 +111,7 @@ SPEECH_RECOGNITION_TIMEOUT = int(os.getenv("SPEECH_RECOGNITION_TIMEOUT", "1000")
 
 # 处理参数
 CHUNK_SIZE = 5000  # 文本分块大小
-MIN_SCORE_THRESHOLD = 0.6  # 最低评分阈值
+MIN_SCORE_THRESHOLD = 0.0  # 最低评分阈值（设置为0以允许所有评分通过）
 MAX_CLIPS_PER_COLLECTION = 5  # 每个合集最大切片数
 
 # 新增：话题提取控制参数

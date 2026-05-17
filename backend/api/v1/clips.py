@@ -174,7 +174,7 @@ async def get_clips(
 ):
     """Get paginated clips with optional filtering."""
     try:
-        pagination = PaginationParams(page=page, size=size)
+        pagination = PaginationParams(page=page, page_size=size)
         
         filters = None
         if project_id or status:

@@ -8,9 +8,9 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 # 导入依赖
-from ..utils.llm_client import LLMClient
 from ..utils.text_processor import TextProcessor
 from ..core.shared_config import PROMPT_FILES, METADATA_DIR
+from ..core.llm_manager import LLMManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class OutlineExtractor:
     """大纲提取器（重构版）"""
     
     def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None):
-        self.llm_client = LLMClient()
+        self.llm_manager = LLMManager()
         self.text_processor = TextProcessor()
         
         # 使用传入的metadata_dir或默认值
@@ -81,14 +81,24 @@ class OutlineExtractor:
                 with open(chunk_file, 'r', encoding='utf-8') as f:
                     chunk_text = f.read()
                 
+                # 检查是否有可用的LLM提供商
+                if not self.llm_manager.current_provider:
+                    logger.warning("没有可用的LLM提供商，跳过大纲提取")
+                    break
+                
                 # 为每个块调用LLM
                 input_data = {"text": chunk_text}
-                response = self.llm_client.call_with_retry(self.outline_prompt, input_data)
+                try:
+                    response = self.llm_manager.current_provider.call(self.outline_prompt, input_data)
+                    llm_content = response.content if response else None
+                except Exception as llm_error:
+                    logger.warning(f"LLM调用失败，将使用降级模式: {llm_error}")
+                    llm_content = None
                 
-                if response:
+                if llm_content:
                     # 解析响应并附加块索引
                     # 注意：这里的chunk_index直接用i，与文件名和原始chunk对应
-                    parsed_outlines = self._parse_outline_response(response, i)
+                    parsed_outlines = self._parse_outline_response(llm_content, i)
                     all_outlines.extend(parsed_outlines)
                 else:
                     logger.warning(f"处理第{i+1}个文本块时返回空响应")

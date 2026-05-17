@@ -70,14 +70,8 @@ class CeleryConfig:
 # 应用配置
 celery_app.config_from_object(CeleryConfig)
 
-# 自动发现任务
-celery_app.autodiscover_tasks([
-    'backend.tasks.processing',
-    'backend.tasks.video', 
-    'backend.tasks.notification',
-    'backend.tasks.maintenance',
-    'backend.tasks.import_processing'  # 添加导入处理任务
-])
+# 禁用自动发现任务，因为系统使用 SimplifiedTaskSubmitter 而非 Celery
+# 如果需要使用 Celery，需要先创建 backend/tasks 目录和相应的任务模块
 
 if __name__ == '__main__':
     celery_app.start()

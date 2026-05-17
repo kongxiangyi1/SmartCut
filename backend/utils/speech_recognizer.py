@@ -84,25 +84,25 @@ def _auto_install_bcut_asr():
         ], capture_output=True, text=True, timeout=600)  # 10分钟超时
         
         if result.returncode == 0:
-            logger.info("✅ bcut-asr自动安装成功")
+            logger.info("[OK] bcut-asr自动安装成功")
             return True
         else:
-            logger.error(f"❌ bcut-asr自动安装失败: {result.stderr}")
+            logger.error(f"[FAIL] bcut-asr自动安装失败: {result.stderr}")
             _show_manual_install_guide()
             return False
             
     except subprocess.TimeoutExpired:
-        logger.error("❌ bcut-asr安装超时")
+        logger.error("[FAIL] bcut-asr安装超时")
         _show_manual_install_guide()
         return False
     except Exception as e:
-        logger.error(f"❌ bcut-asr自动安装失败: {e}")
+        logger.error(f"[FAIL] bcut-asr自动安装失败: {e}")
         _show_manual_install_guide()
         return False
 
 def _show_manual_install_guide():
     """显示手动安装指导"""
-    logger.info("📋 手动安装指导:")
+    logger.info("[LIST] 手动安装指导:")
     logger.info("1. 安装 ffmpeg:")
     logger.info("   macOS: brew install ffmpeg")
     logger.info("   Ubuntu: sudo apt install ffmpeg")
@@ -128,13 +128,13 @@ def _ensure_bcut_asr_available():
             from bcut_asr import BcutASR
             from bcut_asr.orm import ResultStateEnum
             BCUT_ASR_AVAILABLE = True
-            logger.info("✅ bcut-asr安装成功，现在可以使用")
+            logger.info("[OK] bcut-asr安装成功，现在可以使用")
             return True
         except ImportError:
-            logger.error("❌ bcut-asr安装后仍无法导入")
+            logger.error("[FAIL] bcut-asr安装后仍无法导入")
             return False
     else:
-        logger.warning("⚠️ bcut-asr自动安装失败，将使用其他方法")
+        logger.warning("[WARN] bcut-asr自动安装失败，将使用其他方法")
         return False
 
 
@@ -296,7 +296,7 @@ class SpeechRecognizer:
         try:
             # 优先尝试导入whisper库（我们之前成功用过）
             import whisper
-            logger.info("✅ whisper库已安装，可用")
+            logger.info("[OK] whisper库已安装，可用")
             return True
         except ImportError:
             try:
@@ -312,7 +312,7 @@ class SpeechRecognizer:
         """检查FunASR是否可用"""
         try:
             from funasr import AutoModel
-            logger.info("✅ FunASR已安装，可用")
+            logger.info("[OK] FunASR已安装，可用")
             return True
         except ImportError:
             logger.warning("FunASR未安装或不可用")
@@ -634,7 +634,7 @@ class SpeechRecognizer:
                         f.write(f"{format_time(start)} --> {format_time(end)}\n")
                         f.write(f"{segment['text'].strip()}\n\n")
                 
-                logger.info(f"✅ Whisper字幕生成成功: {output_path}")
+                logger.info(f"[OK] Whisper字幕生成成功: {output_path}")
                 return output_path
                 
             except Exception as e:
@@ -844,7 +844,7 @@ class SpeechRecognizer:
                                 f.write(f"{text}\n\n")
                                 segment_index += 1
 
-            logger.info(f"✅ FunASR字幕生成成功: {output_path}")
+            logger.info(f"[OK] FunASR字幕生成成功: {output_path}")
             return output_path
 
         except SpeechRecognitionError:

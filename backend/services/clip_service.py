@@ -5,11 +5,12 @@
 
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 from ..services.base import BaseService
 from ..repositories.clip_repository import ClipRepository
 from ..models.clip import Clip
-from ..schemas.clip import ClipCreate, ClipUpdate, ClipResponse, ClipListResponse, ClipFilter
+from ..schemas.clip import ClipCreate, ClipUpdate, ClipResponse, ClipListResponse, ClipFilter, ClipStatus
 from ..schemas.base import PaginationParams, PaginationResponse
 
 
@@ -20,6 +21,24 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
         repository = ClipRepository(db)
         super().__init__(repository)
         self.db = db
+    
+    def _parse_datetime(self, value):
+        """Parse datetime from string or return current datetime."""
+        if value is None:
+            return datetime.now()
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                # Try parsing various datetime formats
+                value = value.replace('T', ' ')
+                return datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+            except:
+                try:
+                    return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except:
+                    return datetime.now()
+        return datetime.now()
     
     def create_clip(self, clip_data: ClipCreate) -> Clip:
         """Create a new clip with business logic."""
@@ -66,8 +85,26 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
         # Convert to response schemas (simplified)
         clip_responses = []
         for clip in items:
+            # Parse status (ensure lowercase for enum matching)
             status_obj = getattr(clip, 'status', None)
-            status_value = status_obj.value if hasattr(status_obj, 'value') else 'pending'
+            if status_obj is None:
+                status_enum = ClipStatus.PENDING
+            elif hasattr(status_obj, 'value'):
+                try:
+                    status_enum = ClipStatus(status_obj.value.lower())
+                except ValueError:
+                    status_enum = ClipStatus.PENDING
+            elif isinstance(status_obj, str):
+                try:
+                    status_enum = ClipStatus(status_obj.lower())
+                except ValueError:
+                    status_enum = ClipStatus.PENDING
+            else:
+                status_enum = ClipStatus.PENDING
+            
+            # Parse datetime fields
+            created_at = self._parse_datetime(getattr(clip, 'created_at', None))
+            updated_at = self._parse_datetime(getattr(clip, 'updated_at', None))
             
             clip_responses.append(ClipResponse(
                 id=str(clip.id),
@@ -78,12 +115,12 @@ class ClipService(BaseService[Clip, ClipCreate, ClipUpdate, ClipResponse]):
                 end_time=getattr(clip, 'end_time', 0),
                 duration=float(getattr(clip, 'duration', 0)),
                 score=getattr(clip, 'score', None),
-                status=status_value,
+                status=status_enum,
                 video_path=getattr(clip, 'video_path', None),
                 tags=getattr(clip, 'tags', []) or [],
                 clip_metadata=getattr(clip, 'clip_metadata', {}) or {},
-                created_at=getattr(clip, 'created_at', None) if isinstance(getattr(clip, 'created_at', None), (type(None), __import__('datetime').datetime)) else None,
-                updated_at=getattr(clip, 'updated_at', None) if isinstance(getattr(clip, 'updated_at', None), (type(None), __import__('datetime').datetime)) else None,
+                created_at=created_at,
+                updated_at=updated_at,
                 collection_ids=[]
             ))
         

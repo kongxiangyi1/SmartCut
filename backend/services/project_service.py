@@ -31,7 +31,18 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         super().__init__(repository)
         self.db = db
     
-    def create_project(self, project_data: ProjectCreate) -> Project:
+    def get_paginated(self, pagination: PaginationParams, filters: Dict = None):
+        """Override to fix PaginationResponse items bug."""
+        items, pagination_response = super().get_paginated(pagination, filters)
+        fixed_pagination = PaginationResponse(
+            page=pagination_response.page,
+            page_size=pagination_response.page_size,
+            total=pagination_response.total,
+            total_pages=pagination_response.total_pages
+        )
+        return items, fixed_pagination
+    
+    def create_project(self, project_data: ProjectCreate, project_id: str = None) -> Project:
         """Create a new project with business logic."""
         # Convert Pydantic schema to dict for repository
         project_dict = project_data.model_dump()
@@ -40,11 +51,15 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         orm_data = {
             "name": project_dict["name"],
             "description": project_dict.get("description"),
-            "project_type": project_dict.get("project_type", "default").value if hasattr(project_dict.get("project_type", "default"), 'value') else project_dict.get("project_type", "default"),  # Map project_type to project_type
-            "video_path": project_dict.get("source_file"),  # Map source_file to video_path
-            "processing_config": project_dict.get("settings", {}),  # Map settings to processing_config
-            "project_metadata": {"source_url": project_dict.get("source_url")}  # Map source_url to metadata
+            "project_type": project_dict.get("project_type", "default").value if hasattr(project_dict.get("project_type", "default"), 'value') else project_dict.get("project_type", "default"),
+            "video_path": project_dict.get("source_file"),
+            "config": project_dict.get("settings", {}),
+            "extended_info": {"source_url": project_dict.get("source_url")}
         }
+        
+        # 如果提供了项目ID，添加到ORM数据中
+        if project_id:
+            orm_data["id"] = project_id
         
         return self.create(**orm_data)
     
@@ -276,7 +291,7 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             if project.status not in ["completed", "failed"]:
                 running_tasks = self.db.query(Task).filter(
                     Task.project_id == project_id,
-                    Task.status == TaskStatus.RUNNING
+                    Task.status == TaskStatus.PROCESSING
                 ).count()
                 
                 if running_tasks > 0:
@@ -286,7 +301,7 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
                 # 对于已完成或失败的项目，记录任务状态但不阻止删除
                 running_tasks = self.db.query(Task).filter(
                     Task.project_id == project_id,
-                    Task.status == TaskStatus.RUNNING
+                    Task.status == TaskStatus.PROCESSING
                 ).count()
                 
                 if running_tasks > 0:
