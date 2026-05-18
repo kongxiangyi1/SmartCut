@@ -10,6 +10,11 @@ from pathlib import Path
 import sys
 import os
 
+# 消除 Hugging Face 和 transformers 警告
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # 确保项目根目录在路径中（支持绝对导入）
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:

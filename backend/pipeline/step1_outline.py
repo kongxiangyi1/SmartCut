@@ -65,7 +65,14 @@ class OutlineExtractor:
             
         # 2. 基于时间智能分块
         chunks = self.text_processor.chunk_srt_data(srt_data, interval_minutes=30)
-        logger.info(f"文本已按~30分钟/块切分，共{len(chunks)}个块")
+        
+        # 计算总文本量和块数统计
+        total_text = " ".join([chunk['text'] for chunk in chunks])
+        estimated_tokens = len(total_text) // 2
+        if len(chunks) == 1:
+            logger.info(f"文本无需切分，单块处理（约 {estimated_tokens} tokens）")
+        else:
+            logger.info(f"文本已按智能切分，共{len(chunks)}个块（平均约 {estimated_tokens // len(chunks)} tokens/块）")
         
         # 3. 保存文本块和SRT块到中间文件
         chunk_files = self._save_chunks_to_files(chunks)
@@ -250,6 +257,17 @@ class OutlineExtractor:
         if shorter_duration > 0:
             overlap_ratio = overlap / shorter_duration
             if overlap_ratio >= 0.5:
+                return True
+
+        # 第四层：时间邻接判断 - 首尾相连且标题部分相似
+        # 如果两个outline时间首尾相连（间隔 <= 5秒），且标题相似度 >= 0.3，则判定为相似
+        gap = max(start1, start2) - min(end1, end2)
+        if 0 <= gap <= 5:
+            from difflib import SequenceMatcher
+            adjacency_similarity = SequenceMatcher(None, title1, title2).ratio()
+            if adjacency_similarity >= 0.3:
+                logger.debug(f"时间邻接合并: gap={gap:.1f}s, 标题相似度={adjacency_similarity:.2f}, "
+                             f'"{title1}" <-> "{title2}"')
                 return True
 
         return False
