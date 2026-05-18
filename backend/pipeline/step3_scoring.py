@@ -770,6 +770,18 @@ class ImportanceIdentifier:
         
         logger.info(f"重要性筛选完成: {len(filtered)}/{len(clips)} 个切片")
         
+        # 【修复】如果筛选结果为0，或者少于合理数量，直接返回所有切片
+        # 避免因为切片数量少于min_clips导致返回空列表
+        min_keep = max(1, len(clips) // 2)  # 至少保留一半
+        
+        if len(filtered) == 0:
+            logger.warning(f"筛选结果为空，直接返回所有切片（保底机制）")
+            return clips
+        
+        if len(filtered) < min_keep:
+            logger.warning(f"筛选结果过少({len(filtered)} < {min_keep})，使用保底机制返回所有切片")
+            return clips
+        
         return filtered
 
 def run_step3_scoring(timeline_path: Path, metadata_dir: Path = None, output_path: Optional[Path] = None, prompt_files: Dict = None) -> List[Dict]:
@@ -854,13 +866,25 @@ def run_step3_scoring(timeline_path: Path, metadata_dir: Path = None, output_pat
     importance_identifier = ImportanceIdentifier()
     high_score_clips = importance_identifier.filter_with_importance(scored_clips, base_threshold)
     
+    # 【修复】智能保底机制：根据输入数量动态调整
+    # 如果输入切片少于配置的min_clips，应该至少保留输入的一半
+    dynamic_min_clips = min(threshold_filter.config["min_clips"], len(scored_clips) // 2 + 1)
+    
     # 如果筛选结果过少，放宽阈值重试
-    if len(high_score_clips) < threshold_filter.config["min_clips"]:
-        logger.warning(f"筛选结果过少({len(high_score_clips)})，放宽阈值重试")
+    if len(high_score_clips) < dynamic_min_clips:
+        logger.warning(f"筛选结果过少({len(high_score_clips)} < {dynamic_min_clips})，放宽阈值重试")
         high_score_clips = importance_identifier.filter_with_importance(
             scored_clips,
-            base_threshold * 0.9
+            base_threshold * 0.8  # 降低更多阈值
         )
+    
+    # 【修复】最终保底：如果结果仍然为空或过少，返回所有切片
+    if len(high_score_clips) == 0:
+        logger.warning("筛选结果为空，返回所有评分切片（最终保底）")
+        high_score_clips = scored_clips
+    elif len(high_score_clips) < dynamic_min_clips and len(high_score_clips) < len(scored_clips) // 2:
+        logger.warning(f"筛选结果过少({len(high_score_clips)})，返回所有评分切片（最终保底）")
+        high_score_clips = scored_clips
     
     # 统计评分来源分布
     score_source_dist = {
