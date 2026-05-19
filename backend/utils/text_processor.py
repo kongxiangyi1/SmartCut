@@ -224,22 +224,41 @@ class TextProcessor:
 
         # 块间重叠：为每个块添加相邻块的上下文信息，防止话题在边界处被切断
         overlap_seconds = overlap_minutes * 60
-        if overlap_seconds > 0 and len(chunks) > 1:
+        if overlap_seconds > 0 and len(chunks) > 0:
             for i, chunk in enumerate(chunks):
                 chunk_start_sec = self.time_to_seconds(chunk['start_time'])
                 chunk_end_sec = self.time_to_seconds(chunk['end_time'])
 
-                # 为非首块添加 overlap_prefix（前一个块末尾的重叠数据）
+                # 为所有非首块添加 overlap_prefix（前一个块末尾的重叠数据）
                 if i > 0:
                     prefix_start = max(0, chunk_start_sec - overlap_seconds)
                     prefix_entries = self._get_srt_in_range(srt_data_with_seconds, prefix_start, chunk_start_sec)
                     chunk['overlap_prefix'] = prefix_entries
 
-                # 为非末块添加 overlap_suffix（后一个块开头的重叠数据）
+                # 为所有非末块添加 overlap_suffix（后一个块开头的重叠数据）
                 if i < len(chunks) - 1:
                     suffix_end = chunk_end_sec + overlap_seconds
                     suffix_entries = self._get_srt_in_range(srt_data_with_seconds, chunk_end_sec, suffix_end)
                     chunk['overlap_suffix'] = suffix_entries
+
+                # 【修复】为首块添加视频开头的上下文（防止开头内容被截断）
+                if i == 0 and len(srt_data_with_seconds) > 0:
+                    video_start_sec = srt_data_with_seconds[0]['start_seconds']
+                    video_lead_in = min(video_start_sec, overlap_seconds)
+                    if video_lead_in > 0:
+                        lead_in_entries = self._get_srt_in_range(srt_data_with_seconds, video_start_sec - video_lead_in, video_start_sec)
+                        chunk['video_start_buffer'] = lead_in_entries
+
+                # 【修复】为末块添加视频结尾的上下文（防止结尾内容被截断）
+                if i == len(chunks) - 1 and len(srt_data_with_seconds) > 0:
+                    video_end_sec = srt_data_with_seconds[-1]['end_seconds']
+                    video_trailing = min(
+                        srt_data_with_seconds[-1]['end_seconds'] - srt_data_with_seconds[-1]['start_seconds'],
+                        overlap_seconds
+                    )
+                    if video_trailing > 0:
+                        trailing_entries = self._get_srt_in_range(srt_data_with_seconds, video_end_sec, video_end_sec + video_trailing)
+                        chunk['video_end_buffer'] = trailing_entries
 
         return chunks
 

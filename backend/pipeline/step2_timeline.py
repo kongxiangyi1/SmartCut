@@ -1,5 +1,11 @@
 """
-Step 2: 时间线提取 - 为大纲中的每个话题定位具体时间区间
+Step 2: 时间线提取 - 为大纲中的每个话题定位具体时间区间（优化版-方案A）
+
+新增功能：
+- 轻量化说话人识别（基于文本特征，不依赖 ModelScope）
+- 双重提示词策略（借鉴 FunClip）
+- 说话人信息标注
+- 说话人统计
 """
 import json
 import logging
@@ -10,43 +16,62 @@ from collections import defaultdict
 
 # 导入依赖
 from ..utils.text_processor import TextProcessor
-from ..core.shared_config import PROMPT_FILES, METADATA_DIR
+from ..core.shared_config import PROMPT_FILES
 from ..core.llm_manager import LLMManager
+from ..utils.simple_speaker_recognizer import (
+    SimpleSpeakerRecognizer,
+    get_speaker_for_topic,
+    get_speaker_statistics
+)
 
 logger = logging.getLogger(__name__)
 
 class TimelineExtractor:
-    """从大纲和SRT字幕中提取精确时间线"""
-    
+    """从大纲和SRT字幕中提取精确时间线（方案A-轻量化）"""
+
     def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None):
         self.llm_manager = LLMManager()
         self.text_processor = TextProcessor()
-        
+
         # 使用传入的metadata_dir或默认值
         if metadata_dir is None:
+            from ..core.shared_config import METADATA_DIR
             metadata_dir = METADATA_DIR
         self.metadata_dir = metadata_dir
-        
+
         # 加载提示词
         prompt_files_to_use = prompt_files if prompt_files is not None else PROMPT_FILES
         with open(prompt_files_to_use['timeline'], 'r', encoding='utf-8') as f:
             self.timeline_prompt = f.read()
-            
+
+        # 【方案A新增】加载内容理解提示词（双重提示词第一阶段）
+        content_prompt_path = Path(__file__).parent.parent / "prompt" / "content_understanding.txt"
+        if content_prompt_path.exists():
+            with open(content_prompt_path, 'r', encoding='utf-8') as f:
+                self.content_understanding_prompt = f.read()
+        else:
+            self.content_understanding_prompt = None
+            logger.warning("内容理解提示词文件不存在，将使用单阶段提示词")
+
         # SRT块的目录
         self.srt_chunks_dir = self.metadata_dir / "step1_srt_chunks"
         self.timeline_chunks_dir = self.metadata_dir / "step2_timeline_chunks"
         self.llm_raw_output_dir = self.metadata_dir / "step2_llm_raw_output"
 
+        # 【方案A】使用轻量化说话人识别器
+        self.speaker_recognizer = SimpleSpeakerRecognizer(n_clusters=2)
+        self.srt_with_speakers = None
+
     def extract_timeline(self, outlines: List[Dict]) -> List[Dict]:
         """
-        提取话题时间区间。
-        新版特性：
-        - 基于预先分块的SRT
-        - 按块批量处理
-        - 缓存原始LLM响应，避免重复调用
-        - 保存每个块的处理结果作为中间文件，增强健壮性
+        提取话题时间区间（方案A-优化版）
+
+        新增特性：
+        - 双重提示词策略（借鉴 FunClip）
+        - 轻量化说话人识别（基于文本特征）
+        - 优化的集成顺序
         """
-        logger.info("开始提取话题时间区间...")
+        logger.info("开始提取话题时间区间（方案A-双重提示词+轻量化说话人识别）...")
         
         if not outlines:
             logger.warning("大纲数据为空，无法提取时间线。")
@@ -55,6 +80,17 @@ class TimelineExtractor:
         if not self.srt_chunks_dir.exists():
             logger.error(f"SRT块目录不存在: {self.srt_chunks_dir}。请先运行Step 1。")
             return []
+
+        # 0. 【方案A前置】先加载所有SRT并做说话人识别
+        logger.info("【前置】先进行说话人识别...")
+        all_srt_data = self._load_all_srt_data()
+        if all_srt_data:
+            speaker_cache_path = self.metadata_dir / "step2_speakers.json"
+            self.srt_with_speakers = self.speaker_recognizer.recognize_srt_segments(
+                all_srt_data,
+                cache_path=speaker_cache_path
+            )
+            logger.info("【前置】说话人识别完成！")
 
         # 1. 创建本步骤需要的目录
         self.timeline_chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -70,7 +106,7 @@ class TimelineExtractor:
                 logger.warning(f"  > 话题 '{outline.get('title', '未知')}' 缺少 chunk_index，将被跳过。")
 
         all_timeline_data = []
-        # 3. 遍历每个块，批量处理，并将结果存为独立的JSON文件
+        # 3. 遍历每个块，批量处理（方案A：双重提示词）
         for chunk_index, chunk_outlines in outlines_by_chunk.items():
             logger.info(f"处理块 {chunk_index}，其中包含 {len(chunk_outlines)} 个话题...")
             
@@ -78,7 +114,7 @@ class TimelineExtractor:
             chunk_output_path = self.timeline_chunks_dir / f"chunk_{chunk_index}.json"
 
             try:
-                # 首先加载对应的SRT块文件，无论是否使用缓存都需要这些信息
+                # 首先加载对应的SRT块文件
                 srt_chunk_path = self.srt_chunks_dir / f"chunk_{chunk_index}.json"
                 if not srt_chunk_path.exists():
                     logger.warning(f"  > 找不到对应的SRT块文件: {srt_chunk_path}，跳过整个块。")
@@ -97,7 +133,9 @@ class TimelineExtractor:
 
                 raw_response = ""
                 llm_cache_path = self.llm_raw_output_dir / f"chunk_{chunk_index}.txt"
+                content_analysis = None
 
+                # 【方案A：双重提示词 - 阶段1】先做内容理解
                 if llm_cache_path.exists():
                     logger.info(f"  > 找到块 {chunk_index} 的LLM原始响应缓存，直接读取。")
                     with open(llm_cache_path, 'r', encoding='utf-8') as f:
@@ -110,7 +148,17 @@ class TimelineExtractor:
                     for sub in srt_chunk_data:
                         srt_text_for_prompt += f"{sub['index']}\\n{sub['start_time']} --> {sub['end_time']}\\n{sub['text']}\\n\\n"
                     
-                    # 为LLM准备一个"干净"的输入，只包含它需要的信息
+                    # 【方案A新增：双重提示词 - 阶段1】内容理解
+                    if self.content_understanding_prompt:
+                        logger.info(f"  > [双重提示词] 阶段1: 内容理解...")
+                        content_analysis = self._do_content_understanding(
+                            srt_text_for_prompt,
+                            chunk_index
+                        )
+                        if content_analysis:
+                            logger.info(f"  > [双重提示词] 内容理解完成！")
+
+                    # 为LLM准备一个"干净"的输入
                     llm_input_outlines = [
                         {"title": o.get("title"), "subtopics": o.get("subtopics")}
                         for o in chunk_outlines
@@ -121,18 +169,25 @@ class TimelineExtractor:
                         "srt_text": srt_text_for_prompt
                     }
                     
-                    # 调用LLM获取原始响应，带重试机制
+                    # 【方案A增强】增强提示词（如果有内容分析）
+                    current_prompt = self.timeline_prompt
+                    if content_analysis:
+                        current_prompt = self._build_enhanced_timeline_prompt(
+                            current_prompt,
+                            content_analysis
+                        )
+                    
+                    # 调用LLM获取原始响应
                     parsed_items = None
                     max_parse_retries = 2
                     
-                    # 检查是否有可用的LLM提供商
                     if not self.llm_manager.current_provider:
                         logger.warning(f"  > 块 {chunk_index} 没有可用的LLM提供商，跳过")
                         break
                     
                     for retry_count in range(1, max_parse_retries + 2):
                         try:
-                            llm_response = self.llm_manager.current_provider.call(self.timeline_prompt, input_data)
+                            llm_response = self.llm_manager.current_provider.call(current_prompt, input_data)
                             raw_response = llm_response.content if llm_response else None
                             
                             if not raw_response:
@@ -218,6 +273,31 @@ class TimelineExtractor:
             all_timeline_data = self._fix_overlapping_times(all_timeline_data)
             logger.info("重叠时间修复完成。")
 
+        # 6. 【修复】合并跨边界的话题
+        if all_timeline_data:
+            logger.info("开始合并跨边界的话题...")
+            all_timeline_data = self._merge_cross_boundary_topics(all_timeline_data)
+            logger.info("跨边界话题合并完成。")
+
+        # 7. 【新增】验证话题完整性
+        if all_timeline_data:
+            logger.info("开始验证话题完整性...")
+            all_timeline_data = self._validate_topic_completeness(all_timeline_data)
+            logger.info("话题完整性验证完成。")
+
+        # 8. 【方案A】添加说话人信息（前置已识别过，这里仅用于填充）
+        if all_timeline_data and self.srt_with_speakers:
+            logger.info("为话题添加主导说话人信息...")
+            for item in all_timeline_data:
+                speaker_id = get_speaker_for_topic(item, self.srt_with_speakers)
+                if speaker_id:
+                    item['speaker_id'] = speaker_id
+                    logger.debug(f"  > 话题 '{item.get('outline', '')[:30]}...' -> 说话人: {speaker_id}")
+
+            # 输出说话人统计
+            speaker_stats = get_speaker_statistics(all_timeline_data)
+            logger.info(f"说话人统计: {speaker_stats}")
+
         return all_timeline_data
         
     def _parse_and_validate_response(self, response: str, chunk_start: str, chunk_end: str, chunk_index: int) -> List[Dict]:
@@ -269,13 +349,29 @@ class TimelineExtractor:
                     chunk_start_sec = self.text_processor.time_to_seconds(chunk_start)
                     chunk_end_sec = self.text_processor.time_to_seconds(chunk_end)
                     
+                    # 记录原始时间戳，用于后续合并跨边界话题
+                    timeline_item['original_start_time'] = timeline_item['start_time']
+                    timeline_item['original_end_time'] = timeline_item['end_time']
+                    timeline_item['strict_chunk_start'] = chunk_start
+                    timeline_item['strict_chunk_end'] = chunk_end
+                    
+                    # 【修复】放宽边界限制：不再强制截断到块边界
+                    # 如果话题延伸到重叠区域（±5秒内），保留延伸部分
                     if start_sec < chunk_start_sec:
-                        logger.warning(f"  > 调整话题 '{timeline_item['outline']}' 的开始时间从 {start_time} 到 {chunk_start}")
-                        timeline_item['start_time'] = chunk_start
+                        # 检查是否在合理的重叠区域内
+                        if start_sec >= chunk_start_sec - 5:  # 允许5秒误差
+                            logger.info(f"  > 保留话题 '{timeline_item['outline']}' 在重叠区域的开始时间 {start_time}")
+                        else:
+                            logger.warning(f"  > 调整话题 '{timeline_item['outline']}' 的开始时间从 {start_time} 到 {chunk_start}")
+                            timeline_item['start_time'] = chunk_start
                     
                     if end_sec > chunk_end_sec:
-                        logger.warning(f"  > 调整话题 '{timeline_item['outline']}' 的结束时间从 {end_time} 到 {chunk_end}")
-                        timeline_item['end_time'] = chunk_end
+                        # 检查是否在合理的重叠区域内
+                        if end_sec <= chunk_end_sec + 5:  # 允许5秒误差
+                            logger.info(f"  > 保留话题 '{timeline_item['outline']}' 在重叠区域的结束时间 {end_time}")
+                        else:
+                            logger.warning(f"  > 调整话题 '{timeline_item['outline']}' 的结束时间从 {end_time} 到 {chunk_end}")
+                            timeline_item['end_time'] = chunk_end
                     
                     logger.info(f"  > 定位成功: {timeline_item['outline']} ({timeline_item['start_time']} -> {timeline_item['end_time']})")
                     validated_items.append(timeline_item)
@@ -472,6 +568,298 @@ class TimelineExtractor:
 
         logger.info(f"时间区间处理完成，{len(fixed_data)}/{len(timeline_data)} 个话题有效")
         return fixed_data
+    
+    def _merge_cross_boundary_topics(self, timeline_data: List[Dict]) -> List[Dict]:
+        """
+        【修复】合并跨边界分割的话题。
+        
+        合并依据（满足以下条件之一即可合并）：
+        1. 跨越块边界 + 时间接近（-2~30秒） + 标题高度相似（> 0.5）
+        2. 跨越块边界 + 时间非常接近（< 5秒） 
+        3. 跨越块边界 + 一个标题是另一个标题的一部分
+        
+        Args:
+            timeline_data: 原始时间线数据
+            
+        Returns:
+            合并后的话题列表
+        """
+        if len(timeline_data) < 2:
+            return timeline_data
+        
+        logger.info(f"开始检查跨边界话题合并，共 {len(timeline_data)} 个话题...")
+        
+        # 按chunk_index和开始时间排序
+        sorted_data = sorted(timeline_data, key=lambda x: (
+            x.get('chunk_index', 0), 
+            self.text_processor.time_to_seconds(x.get('start_time', '00:00:00,000'))
+        ))
+        
+        merged = []
+        i = 0
+        
+        while i < len(sorted_data):
+            current = sorted_data[i]
+            
+            # 检查是否需要与下一个话题合并
+            if i + 1 < len(sorted_data):
+                next_item = sorted_data[i + 1]
+                
+                current_chunk = current.get('chunk_index', 0)
+                next_chunk = next_item.get('chunk_index', 0)
+                current_end = self.text_processor.time_to_seconds(current.get('end_time', '00:00:00,000'))
+                next_start = self.text_processor.time_to_seconds(next_item.get('start_time', '00:00:00,000'))
+                
+                # 计算标题相似度
+                current_title = str(current.get('outline', '')).lower().strip()
+                next_title = str(next_item.get('outline', '')).lower().strip()
+                titles_similar = self._calculate_title_similarity(current_title, next_title)
+                
+                # 检查是否应该合并（更宽松的条件）
+                time_gap = next_start - current_end
+                should_merge = False
+                merge_reason = ""
+                
+                # 条件1：跨越块边界 + 合理时间间隔（-2~30秒）+ 标题有一定相似度（> 0.5）
+                if current_chunk != next_chunk and time_gap < 30 and time_gap >= -2:
+                    if titles_similar > 0.5:
+                        should_merge = True
+                        merge_reason = f"跨块相似话题(相似度={titles_similar:.2f}, 间隔={time_gap:.1f}s)"
+                    elif titles_similar > 0.3 and time_gap < 10:
+                        # 时间更近时，相似度要求可以更低
+                        should_merge = True
+                        merge_reason = f"跨块近时间话题(相似度={titles_similar:.2f}, 间隔={time_gap:.1f}s)"
+                    # 条件2：包含关系（一个标题是另一个的一部分）
+                    elif current_title in next_title or next_title in current_title:
+                        should_merge = True
+                        merge_reason = f"跨块包含关系话题(间隔={time_gap:.1f}s)"
+                    # 条件3：时间非常接近（< 5秒），即使标题不太相似
+                    elif time_gap < 5:
+                        should_merge = True
+                        merge_reason = f"跨块极近时间话题(间隔={time_gap:.1f}s)"
+                
+                if should_merge:
+                    logger.info(f"  > 合并话题: '{current_title[:40]}...' -> '{next_title[:40]}...' ({merge_reason})")
+                    
+                    # 合并时间范围
+                    merged_topic = current.copy()
+                    merged_topic['start_time'] = current['start_time']
+                    merged_topic['end_time'] = next_item['end_time']
+                    merged_topic['merged'] = True
+                    merged_topic['original_parts'] = [
+                        {'outline': current.get('outline'), 'start': current.get('start_time'), 'end': current.get('end_time')},
+                        {'outline': next_item.get('outline'), 'start': next_item.get('start_time'), 'end': next_item.get('end_time')}
+                    ]
+                    
+                    # 使用较完整的内容作为标题
+                    if len(next_title) > len(current_title):
+                        merged_topic['outline'] = next_item.get('outline')
+                    # 如果两个标题都有内容，可以合并它们
+                    elif current_title and next_title:
+                        # 提取共同部分或选择更全面的描述
+                        if len(current_title) > 5 and len(next_title) > 5:
+                            # 尝试合并标题（取第一个标题的前半部分 + 第二个标题的后半部分）
+                            # 或者直接使用较长的那个
+                            pass
+                    
+                    merged.append(merged_topic)
+                    i += 2  # 跳过已合并的两个话题
+                    continue
+            
+            # 不需要合并的话题
+            merged.append(current)
+            i += 1
+        
+        if len(merged) != len(timeline_data):
+            logger.info(f"  > 合并完成: {len(timeline_data)} -> {len(merged)} 个话题")
+        else:
+            logger.info("  > 没有发现需要合并的跨边界话题")
+        
+        return merged
+    
+    def _calculate_title_similarity(self, title1: str, title2: str) -> float:
+        """
+        计算两个标题的相似度 - 优化版本，更适合中文
+        
+        Args:
+            title1: 第一个标题
+            title2: 第二个标题
+            
+        Returns:
+            相似度分数 (0-1)
+        """
+        if not title1 or not title2:
+            return 0.0
+        
+        # 完全相同 → 1.0
+        if title1 == title2:
+            return 1.0
+        
+        # 包含关系 → 0.85
+        if title1 in title2 or title2 in title1:
+            return 0.85
+        
+        # 提取关键词比较
+        keywords1 = set(self._extract_keywords(title1))
+        keywords2 = set(self._extract_keywords(title2))
+        
+        if not keywords1 or not keywords2:
+            return 0.0
+        
+        # Jaccard相似度
+        intersection = len(keywords1 & keywords2)
+        union = len(keywords1 | keywords2)
+        
+        if union == 0:
+            return 0.0
+        
+        jaccard = intersection / union
+        
+        # 长度相似度
+        len_ratio = min(len(title1), len(title2)) / max(len(title1), len(title2))
+        
+        # 字符重叠率（连续相同的字符序列）
+        char_overlap = self._calculate_char_overlap(title1, title2)
+        
+        # 综合评分：Jaccard + 长度 + 字符重叠
+        return jaccard * 0.5 + len_ratio * 0.2 + char_overlap * 0.3
+    
+    def _calculate_char_overlap(self, text1: str, text2: str) -> float:
+        """
+        计算两个文本的字符重叠率
+        
+        Args:
+            text1: 文本1
+            text2: 文本2
+            
+        Returns:
+            重叠率 (0-1)
+        """
+        if not text1 or not text2:
+            return 0.0
+        
+        # 计算最长公共子序列的简单版本
+        # 检查是否有连续的相同字符序列
+        max_common_len = 0
+        # 检查长度从min(3, len(text1), len(text2)) 到1
+        min_len = min(3, len(text1), len(text2))
+        for check_len in range(min_len, 0, -1):
+            for i in range(len(text1) - check_len + 1):
+                substr = text1[i:i+check_len]
+                if substr in text2:
+                    max_common_len = check_len
+                    break
+            if max_common_len > 0:
+                break
+        
+        # 归一化到 0-1
+        if max_common_len == 0:
+            return 0.0
+        
+        return min(1.0, max_common_len / 3.0)
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """
+        从文本中提取关键词（简单的中文分词改进版）
+        
+        Args:
+            text: 输入文本
+            
+        Returns:
+            关键词列表
+        """
+        # 简单的关键词提取：移除标点，按常用分隔符拆分
+        # 移除标点符号
+        text = re.sub(r'[^\w\s]', '', text)
+        
+        # 常用分隔符（空格、逗号、顿号等）
+        separators = [' ', '，', '、', ',', '；', ';', '。', '.', '：', ':']
+        words = []
+        current_word = ''
+        
+        for char in text:
+            if char in separators:
+                if current_word:
+                    words.append(current_word)
+                    current_word = ''
+            else:
+                current_word += char
+        
+        if current_word:
+            words.append(current_word)
+        
+        # 过滤掉太短的词
+        stopwords = {'的', '是', '在', '了', '和', '与', '或', '以及', '等', '之', '于', '这', '那', '有', '我', '你', '他', '我们', '你们', '他们'}
+        keywords = [w for w in words if len(w) >= 2 and w not in stopwords]
+        
+        # 如果没有关键词，尝试 n-gram
+        if not keywords and len(text) >= 2:
+            # 尝试双字切分
+            for i in range(len(text) - 1):
+                bigram = text[i:i+2]
+                keywords.append(bigram)
+        
+        return keywords
+    
+    def _validate_topic_completeness(self, timeline_data: List[Dict]) -> List[Dict]:
+        """
+        【新增】验证话题完整性，检测可能被截断的话题
+        
+        检测规则：
+        1. 检查话题开始时间是否紧邻前一个话题的结束时间（可能被截断）
+        2. 检查话题时长是否异常短（可能内容不完整）
+        3. 检查话题标题是否过于笼统（可能需要细分）
+        
+        Args:
+            timeline_data: 时间线数据
+            
+        Returns:
+            验证后的话题列表（添加完整性标记）
+        """
+        if len(timeline_data) < 2:
+            return timeline_data
+        
+        logger.info(f"开始验证 {len(timeline_data)} 个话题的完整性...")
+        
+        for i, topic in enumerate(timeline_data):
+            start_sec = self.text_processor.time_to_seconds(topic.get('start_time', '00:00:00,000'))
+            end_sec = self.text_processor.time_to_seconds(topic.get('end_time', '00:00:00,000'))
+            duration = end_sec - start_sec
+            outline = topic.get('outline', '')
+            
+            # 检测异常短的话题
+            if duration < 30:
+                topic['completeness_warning'] = 'short_duration'
+                logger.warning(f"  > 话题 '{outline[:30]}...' 时长较短({duration:.1f}秒)，可能内容不完整")
+            
+            # 检测话题标题是否过于笼统
+            generic_titles = [
+                '分析', '介绍', '概述', '总结', '讨论', '讲解',
+                '内容', '部分', '话题', '问题', '方面'
+            ]
+            
+            outline_lower = outline.lower()
+            is_generic = any(g in outline_lower for g in generic_titles) and len(outline) < 10
+            
+            if is_generic:
+                topic['completeness_warning'] = 'generic_title'
+                logger.warning(f"  > 话题 '{outline}' 标题过于笼统，可能需要更具体的描述")
+            
+            # 检测与前一个话题的时间关系
+            if i > 0:
+                prev_topic = timeline_data[i - 1]
+                prev_end_sec = self.text_processor.time_to_seconds(prev_topic.get('end_time', '00:00:00,000'))
+                time_gap = start_sec - prev_end_sec
+                
+                # 如果时间间隔为负或非常小，说明可能被截断
+                if time_gap < 0:
+                    topic['completeness_warning'] = 'overlapping'
+                    logger.warning(f"  > 话题 '{outline[:30]}...' 与前一个话题时间重叠，可能需要合并")
+                elif time_gap < 2:
+                    topic['completeness_warning'] = 'tight_boundary'
+                    logger.info(f"  > 话题 '{outline[:30]}...' 与前一个话题紧密相邻，边界可能需要调整")
+        
+        return timeline_data
 
     def _seconds_to_time(self, seconds: float) -> str:
         """将秒数转换为 HH:MM:SS,mmm 格式"""
@@ -485,7 +873,7 @@ class TimelineExtractor:
         保存时间区间数据
         """
         if output_path is None:
-            output_path = METADATA_DIR / "step2_timeline.json"
+            output_path = self.metadata_dir / "step2_timeline.json"
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -502,11 +890,148 @@ class TimelineExtractor:
         with open(input_path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
+    def _load_all_srt_data(self) -> List[Dict]:
+        """
+        加载所有 SRT 块并合并为一个列表
+
+        Returns:
+            合并后的完整 SRT 数据
+        """
+        if not self.srt_chunks_dir.exists():
+            logger.warning("SRT 块目录不存在，无法加载完整 SRT 数据")
+            return []
+
+        all_srt_data = []
+
+        # 按顺序加载所有 SRT 块
+        chunk_files = sorted(self.srt_chunks_dir.glob("chunk_*.json"))
+        logger.info(f"找到 {len(chunk_files)} 个 SRT 块文件")
+
+        for chunk_file in chunk_files:
+            try:
+                with open(chunk_file, 'r', encoding='utf-8') as f:
+                    chunk_data = json.load(f)
+                all_srt_data.extend(chunk_data)
+                logger.debug(f"加载 SRT 块 {chunk_file.name}，共 {len(chunk_data)} 条")
+            except Exception as e:
+                logger.warning(f"加载 SRT 块 {chunk_file} 失败: {e}")
+
+        logger.info(f"共加载 {len(all_srt_data)} 条 SRT 数据")
+        return all_srt_data
+
+    # ========================================
+    # 【方案A新增】双重提示词策略辅助方法
+    # ========================================
+    def _do_content_understanding(self, srt_text: str, chunk_index: int) -> Optional[Dict]:
+        """
+        【方案A】双重提示词 - 阶段1: 内容理解
+
+        借鉴 FunClip 的策略，先让 LLM 理解 SRT 的内容结构，
+        再进行时间线定位。
+
+        Args:
+            srt_text: SRT 文本内容
+            chunk_index: 块索引，用于日志和缓存
+
+        Returns:
+            内容分析结果 (Dict) 或 None (失败)
+        """
+        try:
+            # 检查是否有内容理解提示词
+            if not self.content_understanding_prompt:
+                return None
+
+            # 检查是否有 LLM 提供商
+            if not self.llm_manager.current_provider:
+                logger.warning("  > [双重提示词] 没有可用的LLM提供商，跳过内容理解")
+                return None
+
+            # 构建输入数据
+            input_data = {"srt_text": srt_text}
+
+            # 调用 LLM
+            llm_response = self.llm_manager.current_provider.call(
+                self.content_understanding_prompt,
+                input_data
+            )
+
+            if not llm_response or not llm_response.content:
+                logger.warning("  > [双重提示词] LLM响应为空")
+                return None
+
+            content_text = llm_response.content.strip()
+
+            # 尝试解析 JSON
+            if content_text.startswith('```json'):
+                content_text = content_text[7:]
+            if content_text.endswith('```'):
+                content_text = content_text[:-3]
+
+            content_analysis = json.loads(content_text.strip())
+
+            # 保存内容分析结果到缓存（可选）
+            analysis_cache_path = self.metadata_dir / f"step2_content_analysis_{chunk_index}.json"
+            with open(analysis_cache_path, 'w', encoding='utf-8') as f:
+                json.dump(content_analysis, f, ensure_ascii=False, indent=2)
+
+            return content_analysis
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"  > [双重提示词] JSON解析失败: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"  > [双重提示词] 内容理解阶段失败: {e}")
+            return None
+
+    def _build_enhanced_timeline_prompt(self, original_prompt: str, content_analysis: Dict) -> str:
+        """
+        【方案A】用内容分析结果增强时间线提示词
+
+        借鉴 FunClip 的策略，将阶段1的分析结果注入到阶段2的提示词中。
+
+        Args:
+            original_prompt: 原始的时间线提示词
+            content_analysis: 阶段1的内容分析结果
+
+        Returns:
+            增强后的提示词
+        """
+        try:
+            # 构建增强部分
+            enhancement = "\n\n【重要补充】基于内容分析的洞察：\n"
+
+            # 1. 添加主要话题的标志性开头
+            if 'main_topics' in content_analysis and isinstance(content_analysis['main_topics'], list):
+                enhancement += "话题的标志性开头：\n"
+                for i, topic in enumerate(content_analysis['main_topics'][:3]):  # 只取前3个
+                    title = topic.get('topic_title', '')
+                    signature = topic.get('signature_opening', '')
+                    if signature:
+                        enhancement += f"  - 话题 '{title}': 标志性开头是 '{signature}'\n"
+
+            # 2. 添加整体亮点
+            if 'key_insights' in content_analysis:
+                enhancement += f"\n视频亮点总结：{content_analysis['key_insights']}\n"
+
+            enhancement += """
+请特别注意：
+- 如果话题有标志性开头，必须从标志性开头的时间点开始截取
+- 保持话题的完整性，不要截断重要内容
+"""
+
+            # 返回增强后的提示词
+            return original_prompt + enhancement
+
+        except Exception as e:
+            logger.warning(f"  > [双重提示词] 增强提示词构建失败: {e}")
+            return original_prompt
+
 def run_step2_timeline(outline_path: Path, metadata_dir: Path = None, output_path: Optional[Path] = None, prompt_files: Dict = None) -> List[Dict]:
     """
     运行Step 2: 时间点提取
     """
     if metadata_dir is None:
+        from ..core.shared_config import METADATA_DIR
         metadata_dir = METADATA_DIR
         
     extractor = TimelineExtractor(metadata_dir, prompt_files)

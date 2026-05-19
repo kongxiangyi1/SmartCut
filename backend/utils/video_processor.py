@@ -13,6 +13,9 @@ from pathlib import Path
 # 创建 logger
 logger = logging.getLogger(__name__)
 
+# 单个clip提取最大超时5分钟
+CLIP_EXTRACT_TIMEOUT = 300
+
 # 修复导入问题
 try:
     from ..core.shared_config import CLIPS_DIR, COLLECTIONS_DIR
@@ -243,7 +246,9 @@ class VideoProcessor:
     
     @staticmethod
     def extract_clip(input_video: Path, output_path: Path, 
-                    start_time: str, end_time: str) -> bool:
+                    start_time: str, end_time: str,
+                    extend_start: float = 2.0, extend_end: float = 2.0,
+                    video_duration: float = None) -> bool:
         """
         从视频中提取指定时间段的片段
         
@@ -252,6 +257,9 @@ class VideoProcessor:
             output_path: 输出视频路径
             start_time: 开始时间 (格式: "00:01:25,140")
             end_time: 结束时间 (格式: "00:02:53,500")
+            extend_start: 开头扩展时间（秒），确保开头内容完整
+            extend_end: 结尾扩展时间（秒），确保结尾内容完整
+            video_duration: 视频总时长（秒），用于边界检测
             
         Returns:
             是否成功
@@ -264,16 +272,51 @@ class VideoProcessor:
             ffmpeg_start_time = VideoProcessor.convert_srt_time_to_ffmpeg_time(start_time)
             ffmpeg_end_time = VideoProcessor.convert_srt_time_to_ffmpeg_time(end_time)
             
-            # 计算持续时间
+            # 计算原始持续时间
             start_seconds = VideoProcessor.convert_ffmpeg_time_to_seconds(ffmpeg_start_time)
             end_seconds = VideoProcessor.convert_ffmpeg_time_to_seconds(ffmpeg_end_time)
+            
+            # 【修复】如果视频总时长未知，先获取
+            if video_duration is None or video_duration <= 0:
+                video_duration = VideoProcessor.get_video_duration(input_video)
+            
+            # 【修复】自动检测边界并扩展 - 为所有切片都添加边界保护
+            original_start_seconds = start_seconds
+            original_end_seconds = end_seconds
+            
+            # 开头边界扩展：所有切片都扩展开头（默认2秒）
+            if extend_start > 0:
+                # 检查是否可以扩展
+                safe_extend_start = min(start_seconds, extend_start)
+                if safe_extend_start > 0.1:
+                    start_seconds -= safe_extend_start
+                    logger.debug(f"  > 开头扩展 {safe_extend_start:.1f}秒，确保视频开头内容完整")
+            
+            # 结尾边界扩展：所有切片都扩展结尾（默认2秒）
+            if video_duration > 0 and extend_end > 0:
+                # 计算可以安全扩展的时间
+                time_to_end = video_duration - end_seconds
+                safe_extend_end = min(time_to_end, extend_end)
+                if safe_extend_end > 0.1:
+                    end_seconds += safe_extend_end
+                    logger.debug(f"  > 结尾扩展 {safe_extend_end:.1f}秒，确保视频结尾内容完整")
+            
+            # 确保时间有效
+            if start_seconds < 0:
+                start_seconds = 0
+            if end_seconds <= start_seconds:
+                end_seconds = start_seconds + 1  # 至少1秒
+            
+            # 转换回时间格式
+            extended_start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_seconds)
+            extended_end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_seconds)
             duration = end_seconds - start_seconds
             
             # 构建优化的FFmpeg命令
             # 使用 -ss 在输入前进行精确定位，使用 -t 指定持续时间
             cmd = [
                 'ffmpeg',
-                '-ss', ffmpeg_start_time,  # 在输入前定位，更精确
+                '-ss', extended_start_time,  # 在输入前定位，更精确
                 '-i', str(input_video),
                 '-t', str(duration),  # 使用持续时间而不是绝对结束时间
                 '-c:v', 'copy',  # 复制视频流
@@ -287,7 +330,14 @@ class VideoProcessor:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
             
             if result.returncode == 0:
-                logger.info(f"成功提取视频片段: {output_path} ({ffmpeg_start_time} -> {ffmpeg_end_time}, 时长: {duration:.2f}秒)")
+                # 计算实际扩展量
+                start_extended = start_seconds - original_start_seconds
+                end_extended = original_end_seconds - end_seconds
+                
+                if start_extended != 0 or end_extended != 0:
+                    logger.info(f"成功提取视频片段(含边界扩展): {output_path} ({extended_start_time} -> {extended_end_time}, 时长: {duration:.2f}秒)")
+                else:
+                    logger.info(f"成功提取视频片段: {output_path} ({ffmpeg_start_time} -> {ffmpeg_end_time}, 时长: {duration:.2f}秒)")
                 return True
             else:
                 logger.error(f"提取视频片段失败: {result.stderr}")
@@ -511,7 +561,6 @@ class VideoProcessor:
             return {}
     
     def batch_extract_clips(self, input_video: Path, clips_data: List[Dict], 
-                           apply_silence_processing: bool = True,
                            use_silence_concat: bool = False) -> List[Path]:
         """
         批量提取视频片段
@@ -519,17 +568,23 @@ class VideoProcessor:
         Args:
             input_video: 输入视频路径
             clips_data: 片段数据列表，每个元素包含id、title、start_time、end_time
-            apply_silence_processing: 是否应用静音处理（调整时间）
             use_silence_concat: 是否使用静音拼接器（去除长静音，保留所有语音）
             
         Returns:
             成功提取的片段路径列表
+        
+        注意: 静音处理是必选项，不可跳过
         """
-        # 应用静音处理（调整时间边界）
-        if apply_silence_processing and not use_silence_concat:
+        # 静音处理为必选项，不可跳过
+        if not use_silence_concat:
             clips_data = self.process_silence_for_clips(input_video, clips_data)
         
         successful_clips = []
+        
+        # 【修复】提前获取视频总时长，用于边界扩展
+        video_duration = VideoProcessor.get_video_duration(input_video)
+        if video_duration > 0:
+            logger.info(f"视频总时长: {video_duration:.2f}秒")
         
         # 初始化静音拼接器（如果启用）
         silence_concat_processor = None
@@ -576,7 +631,11 @@ class VideoProcessor:
                 if isinstance(end_time, (int, float)):
                     end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
                 
-                success = VideoProcessor.extract_clip(input_video, output_path, start_time, end_time)
+                # 【修复】传递视频总时长给extract_clip，支持边界扩展
+                success = VideoProcessor.extract_clip(
+                    input_video, output_path, start_time, end_time,
+                    video_duration=video_duration
+                )
             
             if success:
                 successful_clips.append(output_path)
@@ -662,7 +721,6 @@ class VideoProcessor:
             return min(4, clips_count)
     
     def batch_extract_clips_parallel(self, input_video: Path, clips_data: List[Dict],
-                                    apply_silence_processing: bool = True,
                                     max_workers: int = None,
                                     progress_callback=None) -> List[Path]:
         """
@@ -671,7 +729,6 @@ class VideoProcessor:
         Args:
             input_video: 输入视频路径
             clips_data: 片段数据列表，每个元素包含id、title、start_time、end_time
-            apply_silence_processing: 是否应用静音处理（调整时间）
             max_workers: 最大并发线程数，默认None（自动根据服务器配置计算）
             progress_callback: 进度回调函数，接收 (completed_count, total_count, clip_id, success)
         
@@ -686,15 +743,14 @@ class VideoProcessor:
         
         注意事项:
             - 并行处理会增加系统资源消耗，但已自动适配服务器配置
-            - 静音处理在并行前统一完成（串行执行），然后并行提取切片
+            - 静音处理在并行前统一完成（串行执行），**静音处理为必选项**
             - 如果需要使用静音拼接器（use_silence_concat），请使用串行版本
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed, Future
         import time
         
-        # 应用静音处理（在并行前串行执行）
-        if apply_silence_processing:
-            clips_data = self.process_silence_for_clips(input_video, clips_data)
+        # 静音处理为必选项，直接执行（不可跳过）
+        clips_data = self.process_silence_for_clips(input_video, clips_data)
         
         total_clips = len(clips_data)
         successful_clips: List[Path] = []
@@ -727,6 +783,13 @@ class VideoProcessor:
         
         logger.info(f"开始并行提取 {total_clips} 个切片，使用 {max_workers} 个线程{'（机械硬盘模式）' if need_io_delay else ''}")
         
+        # 【修复】提前获取视频总时长，用于边界扩展
+        video_duration = VideoProcessor.get_video_duration(input_video)
+        if video_duration > 0:
+            logger.info(f"视频总时长: {video_duration:.2f}秒")
+        else:
+            logger.warning("无法获取视频总时长，边界扩展可能不准确")
+        
         def _extract_clip_wrapper(clip_data: Dict) -> Tuple[str, bool, str, Optional[Path]]:
             """切片提取包装函数，用于线程池执行"""
             clip_id = clip_data['id']
@@ -754,7 +817,11 @@ class VideoProcessor:
             if isinstance(end_time, (int, float)):
                 end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
             
-            success = VideoProcessor.extract_clip(input_video, output_path, start_time, end_time)
+            # 【修复】传递视频总时长给extract_clip，支持边界扩展
+            success = VideoProcessor.extract_clip(
+                input_video, output_path, start_time, end_time,
+                video_duration=video_duration
+            )
             
             # 机械硬盘模式：添加IO延迟，避免磁盘过载
             if need_io_delay:
@@ -784,7 +851,7 @@ class VideoProcessor:
             for future in as_completed(future_to_clip):
                 clip_id = future_to_clip[future]
                 try:
-                    result_clip_id, success, message, output_path = future.result()
+                    result_clip_id, success, message, output_path = future.result(timeout=CLIP_EXTRACT_TIMEOUT)
                     
                     if success and output_path:
                         successful_clips.append(output_path)
@@ -797,6 +864,12 @@ class VideoProcessor:
                     # 记录结果
                     status = "成功" if success else "失败"
                     logger.info(f"[{completed_count}/{total_clips}] 切片 {clip_id} {status}")
+                    
+                except TimeoutError:
+                    completed_count += 1
+                    logger.error(f"[{completed_count}/{total_clips}] 切片 {clip_id} 提取超时(>{CLIP_EXTRACT_TIMEOUT}秒)，已跳过")
+                    if progress_callback:
+                        progress_callback(completed_count, total_clips, clip_id, False)
                     
                 except Exception as e:
                     completed_count += 1

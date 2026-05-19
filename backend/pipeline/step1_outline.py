@@ -1,5 +1,10 @@
 """
-Step 1: 大纲提取 - 从转写文本中提取结构性大纲
+Step 1: 大纲提取 - 从转写文本中提取结构性大纲（优化版）
+
+新增功能：
+- 热词提取
+- 标志性开头识别
+- 热词增强的提示词
 """
 import json
 import logging
@@ -11,29 +16,34 @@ from pathlib import Path
 from ..utils.text_processor import TextProcessor
 from ..core.shared_config import PROMPT_FILES, METADATA_DIR
 from ..core.llm_manager import LLMManager
+from ..utils.hotword_extractor import HotwordExtractor, SIGNATURE_PATTERNS
 
 logger = logging.getLogger(__name__)
 
 class OutlineExtractor:
-    """大纲提取器（重构版）"""
-    
+    """大纲提取器（优化版 - 借鉴 FunClip）"""
+
     def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None):
         self.llm_manager = LLMManager()
         self.text_processor = TextProcessor()
-        
+
+        # 【新增】热词提取器
+        self.hotword_extractor = HotwordExtractor()
+        self.hotwords = []
+
         # 使用传入的metadata_dir或默认值
         if metadata_dir is None:
             metadata_dir = METADATA_DIR
         self.metadata_dir = metadata_dir
-        
+
         # 使用传入的prompt_files或默认值
         if prompt_files is None:
             prompt_files = PROMPT_FILES
-        
+
         # 加载提示词
         with open(prompt_files['outline'], 'r', encoding='utf-8') as f:
             self.outline_prompt = f.read()
-            
+
         # 创建用于存放中间文本块的目录
         self.chunks_dir = self.metadata_dir / "step1_chunks"
         self.chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -43,16 +53,20 @@ class OutlineExtractor:
 
     def extract_outline(self, srt_path: Path) -> List[Dict]:
         """
-        从SRT文件提取视频大纲
-        
+        从SRT文件提取视频大纲（优化版）
+
+        新增功能：
+        - 热词提取
+        - 热词增强的提示词
+
         Args:
             srt_path: SRT文件路径
-            
+
         Returns:
             视频大纲列表
         """
-        logger.info("开始提取视频大纲...")
-        
+        logger.info("开始提取视频大纲（优化版）...")
+
         # 1. 解析SRT文件
         try:
             srt_data = self.text_processor.parse_srt(srt_path)
@@ -62,10 +76,16 @@ class OutlineExtractor:
         except Exception as e:
             logger.error(f"解析SRT文件失败: {e}")
             return []
-            
-        # 2. 基于时间智能分块
+
+        # 【新增】2. 提取热词
+        self.hotwords = self.hotword_extractor.extract_from_srt(srt_data)
+
+        # 【新增】3. 保存热词到中间文件
+        self._save_hotwords(self.hotwords)
+
+        # 4. 基于时间智能分块
         chunks = self.text_processor.chunk_srt_data(srt_data, interval_minutes=30)
-        
+
         # 计算总文本量和块数统计
         total_text = " ".join([chunk['text'] for chunk in chunks])
         estimated_tokens = len(total_text) // 2
@@ -73,49 +93,59 @@ class OutlineExtractor:
             logger.info(f"文本无需切分，单块处理（约 {estimated_tokens} tokens）")
         else:
             logger.info(f"文本已按智能切分，共{len(chunks)}个块（平均约 {estimated_tokens // len(chunks)} tokens/块）")
-        
-        # 3. 保存文本块和SRT块到中间文件
+
+        # 5. 保存文本块和SRT块到中间文件
         chunk_files = self._save_chunks_to_files(chunks)
         self._save_srt_chunks(chunks)
-        
+
         all_outlines = []
-        
-        # 4. 逐一处理每个文本块文件
+
+        # 6. 逐一处理每个文本块文件
         for i, chunk_file in enumerate(chunk_files):
             logger.info(f"处理第{i+1}/{len(chunks)}个文本块: {chunk_file.name}")
             try:
                 # 读取文本块内容
                 with open(chunk_file, 'r', encoding='utf-8') as f:
                     chunk_text = f.read()
-                
+
                 # 检查是否有可用的LLM提供商
                 if not self.llm_manager.current_provider:
                     logger.warning("没有可用的LLM提供商，跳过大纲提取")
                     break
-                
+
+                # 【新增】获取当前块的相关热词
+                chunk_hotwords = self._get_chunk_hotwords(i, self.hotwords, chunks)
+
+                # 【新增】增强提示词
+                enhanced_prompt = self._enhance_prompt_with_hotwords(
+                    self.outline_prompt,
+                    chunk_hotwords
+                )
+
                 # 为每个块调用LLM
                 input_data = {"text": chunk_text}
                 try:
-                    response = self.llm_manager.current_provider.call(self.outline_prompt, input_data)
+                    response = self.llm_manager.current_provider.call(enhanced_prompt, input_data)
                     llm_content = response.content if response else None
                 except Exception as llm_error:
                     logger.warning(f"LLM调用失败，将使用降级模式: {llm_error}")
                     llm_content = None
-                
+
                 if llm_content:
                     # 解析响应并附加块索引
-                    # 注意：这里的chunk_index直接用i，与文件名和原始chunk对应
-                    parsed_outlines = self._parse_outline_response(llm_content, i)
+                    parsed_outlines = self._parse_outline_response(
+                        llm_content, i, chunk_hotwords
+                    )
                     all_outlines.extend(parsed_outlines)
                 else:
                     logger.warning(f"处理第{i+1}个文本块时返回空响应")
             except Exception as e:
                 logger.error(f"处理第{i+1}个文本块失败: {e}")
                 continue
-        
-        # 5. 合并和去重
+
+        # 7. 合并和去重
         final_outlines = self._merge_outlines(all_outlines)
-        
+
         logger.info(f"大纲提取完成，共{len(final_outlines)}个话题")
         return final_outlines
 
@@ -298,13 +328,147 @@ class OutlineExtractor:
         
         logger.info(f"大纲已保存到: {output_path}")
         return output_path
-    
+
     def load_outline(self, input_path: Path) -> List[Dict]:
         """
         从文件加载大纲
         """
         with open(input_path, 'r', encoding='utf-8') as f:
             return json.load(f)
+
+    # 【新增】热词相关辅助方法
+
+    def _save_hotwords(self, hotwords: List[Dict]):
+        """保存热词到元数据目录"""
+        hotwords_file = self.metadata_dir / "step1_hotwords.json"
+        self.hotword_extractor.save_hotwords(hotwords, hotwords_file)
+
+    def _get_chunk_hotwords(
+        self,
+        chunk_index: int,
+        hotwords: List[Dict],
+        chunks: List[Dict]
+    ) -> List[str]:
+        """获取当前块的相关热词"""
+        if not hotwords or not chunks:
+            return []
+
+        chunk = chunks[chunk_index]
+        chunk_start = self._time_to_seconds(
+            chunk.get('start_time', '00:00:00,000')
+        )
+        chunk_end = self._time_to_seconds(
+            chunk.get('end_time', '01:00:00,000')
+        )
+
+        chunk_hotwords = []
+        for hotword in hotwords:
+            for pos in hotword.get('positions', []):
+                pos_time = self._time_to_seconds(
+                    pos.get('start_time', '00:00:00,000')
+                )
+                if chunk_start <= pos_time <= chunk_end:
+                    chunk_hotwords.append(hotword['word'])
+                    break
+
+        return list(set(chunk_hotwords))
+
+    def _enhance_prompt_with_hotwords(
+        self,
+        prompt: str,
+        hotwords: List[str]
+    ) -> str:
+        """用热词增强提示词 - 借鉴 FunClip 的思路"""
+        if not hotwords:
+            return prompt
+
+        signature_words = [w for w in hotwords if w in SIGNATURE_PATTERNS]
+        other_hotwords = [w for w in hotwords if w not in SIGNATURE_PATTERNS]
+
+        enhancement = f"""
+
+【重要提示 - 借鉴 FunClip】
+以下是本视频中的重要关键词，它们很可能是话题的标志性开头：
+
+标志性开头词：
+{', '.join(signature_words) if signature_words else '无'}
+
+其他热词：
+{', '.join(other_hotwords) if other_hotwords else '无'}
+
+请特别注意：
+1. 如果某个话题以标志性开头词开始，请确保将其作为独立话题的起点
+2. 话题标题应该尽量包含这些标志性词汇
+3. 不要把完整的话题切分成多个部分
+4. 标题要具体，不要用"地域文化分析"这种笼统的说法
+"""
+
+        return prompt + enhancement
+
+    def _parse_outline_response(
+        self,
+        response: str,
+        chunk_index: int,
+        hotwords: List[str] = None
+    ) -> List[Dict]:
+        """
+        解析大模型的大纲响应（优化版）
+
+        新增：支持热词优化标题
+        """
+        outlines = []
+        lines = response.split('\n')
+        current_outline = None
+
+        for line in lines:
+            line = line.strip()
+
+            if re.match(r'^\d+\.\s*\*\*', line):
+                if current_outline:
+                    outlines.append(current_outline)
+
+                topic_name = line.split('**')[1] if '**' in line else line.split('.', 1)[1].strip()
+
+                # 【新增】检查标题是否包含热词，如果没有尝试优化
+                topic_name = self._optimize_topic_title(topic_name, hotwords)
+
+                current_outline = {
+                    'title': topic_name,
+                    'subtopics': [],
+                    'chunk_index': chunk_index,
+                    'has_signature': any(w in topic_name for w in SIGNATURE_PATTERNS) if hotwords else False
+                }
+
+            elif line.startswith('-') and current_outline:
+                subtopic = line[1:].strip()
+                if subtopic and len(subtopic) <= 200:
+                    current_outline['subtopics'].append(subtopic)
+
+        if current_outline:
+            outlines.append(current_outline)
+
+        return outlines
+
+    def _optimize_topic_title(self, title: str, hotwords: List[str]) -> str:
+        """
+        优化话题标题 - 如果标题中没有热词，考虑重命名
+
+        借鉴 FunClip 的热词定制化思路
+        """
+        if not hotwords:
+            return title
+
+        # 如果标题中已经包含标志性词，直接返回
+        for hotword in hotwords:
+            if hotword in title:
+                return title
+
+        # 标题中没有热词，看看是否应该添加标志性开头
+        for signature in SIGNATURE_PATTERNS:
+            if signature in hotwords:
+                return f"{signature}：{title}"
+
+        return title
 
 def run_step1_outline(srt_path: Path, metadata_dir: Path = None, output_path: Optional[Path] = None, prompt_files: Dict = None) -> List[Dict]:
     """

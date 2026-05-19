@@ -131,7 +131,10 @@ class ClipScorer:
         
         # 记录评分历史
         self._log_scoring_history(scoring_history)
-        
+
+        # 【新增】借鉴 FunClip：说话人质量评分增强
+        scored_clips = self._enhance_with_speaker_score(scored_clips)
+
         return scored_clips
     
     def _score_with_llm(self, timeline_data: List[Dict]) -> List[Dict]:
@@ -284,12 +287,71 @@ class ClipScorer:
         for attempt in history['attempts']:
             method = attempt['method'].upper()
             status = attempt['status']
-            
+
             if status == 'success':
                 logger.info(f"  [{method}] 成功: {attempt['count']}个, 耗时: {attempt['time']:.2f}秒")
             else:
                 logger.info(f"  [{method}] 失败: {attempt.get('error', '未知错误')}")
-    
+
+    def _enhance_with_speaker_score(self, clips: List[Dict]) -> List[Dict]:
+        """
+        借鉴 FunClip：根据说话人信息增强评分
+
+        逻辑：
+        1. 如果是主要说话人（出现频率最高），增加评分
+        2. 如果话题包含多个说话人，说明是对话，可能更有价值
+        """
+        if not clips:
+            return clips
+
+        # 统计说话人分布
+        speaker_counts = {}
+        for clip in clips:
+            speaker_id = clip.get('speaker_id')
+            if speaker_id:
+                speaker_counts[speaker_id] = speaker_counts.get(speaker_id, 0) + 1
+
+        if not speaker_counts:
+            logger.warning("没有说话人信息，跳过说话人评分增强")
+            return clips
+
+        # 找到主要说话人
+        main_speaker = max(speaker_counts.items(), key=lambda x: x[1])[0]
+        main_speaker_freq = speaker_counts[main_speaker] / len(clips)
+
+        logger.info(f"说话人分布: {speaker_counts}，主要说话人: {main_speaker} (占比: {main_speaker_freq:.2%})")
+
+        # 增强评分
+        enhanced_clips = []
+        for clip in clips:
+            original_score = clip.get('final_score', 0.5)
+            speaker_id = clip.get('speaker_id')
+
+            enhancement = 0.0
+
+            # 1. 主要说话人加分
+            if speaker_id == main_speaker and main_speaker_freq > 0.5:
+                enhancement += 0.08
+                logger.debug(f"主要说话人加分: +0.08 给 '{clip.get('outline', '')[:30]}...'")
+
+            # 2. 避免极端值
+            enhanced_score = min(1.0, max(0.0, original_score + enhancement))
+
+            # 更新评分
+            clip['final_score'] = round(enhanced_score, 2)
+            clip['_speaker_enhancement'] = round(enhancement, 3)
+
+            if enhancement != 0:
+                logger.debug(
+                    f"说话人评分增强: '{clip.get('outline', '')[:30]}...' "
+                    f"{original_score:.2f} -> {enhanced_score:.2f} "
+                    f"(说话人: {speaker_id})"
+                )
+
+            enhanced_clips.append(clip)
+
+        return enhanced_clips
+
     def _get_llm_evaluation(self, clips: List[Dict]) -> List[Dict]:
         """
         使用LLM进行批量评估，为每个clip添加 final_score 和 recommend_reason - 一期改进版：增强错误处理
