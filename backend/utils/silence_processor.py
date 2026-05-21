@@ -42,6 +42,8 @@ class SilenceProcessor:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=300  # 5分钟超时
             )
             
@@ -85,13 +87,15 @@ class SilenceProcessor:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=60
             )
-            
+
             # 解析输出获取平均音量
             output = result.stderr
             mean_volume = None
-            
+
             for line in output.split('\n'):
                 if 'mean_volume' in line:
                     # 提取平均音量值
@@ -100,7 +104,7 @@ class SilenceProcessor:
                     if match:
                         mean_volume = float(match.group(1))
                         break
-            
+
             if mean_volume is not None and mean_volume < threshold:
                 # 如果平均音量低于阈值，认为有静音
                 # 这里简化处理，返回 0
@@ -141,6 +145,8 @@ class SilenceProcessor:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=300
             )
             
@@ -216,12 +222,14 @@ class SilenceProcessor:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=600
             )
-            
+
             # 清理临时文件
             concat_list.unlink()
-            
+
             if result.returncode == 0:
                 logger.info(f"成功拼接视频: {output_path}")
                 return True
@@ -269,6 +277,8 @@ class SilenceProcessor:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=60
             )
             

@@ -76,13 +76,15 @@ class SilenceConcat:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=600
             )
             
             # 清理临时文件
             if concat_list.exists():
                 concat_list.unlink()
-            
+
             if result.returncode == 0:
                 logger.info(f"成功拼接视频: {output_path}")
                 return True
@@ -120,6 +122,8 @@ class SilenceConcat:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=300
             )
             
@@ -198,6 +202,8 @@ class SilenceConcat:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='ignore',
                 timeout=600
             )
             

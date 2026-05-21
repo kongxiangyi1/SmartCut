@@ -853,7 +853,7 @@ def _extract_multi_segment_clip(input_video: Path, output_path: Path,
             str(output_path)
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, encoding='utf-8', timeout=600)
         if result.returncode != 0:
             logger.error(f"多段拼接失败: {result.stderr}")
             return False

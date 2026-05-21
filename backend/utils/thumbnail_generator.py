@@ -72,6 +72,8 @@ def generate_project_thumbnail(
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='ignore',
             timeout=60
         )
 
@@ -174,6 +176,8 @@ def get_video_duration(video_path: str) -> Optional[float]:
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='ignore',
             timeout=30
         )
 

@@ -7,6 +7,7 @@ import subprocess
 import json
 import os
 import asyncio
+import shutil
 from typing import Optional, List, Dict, Any, Union
 from pathlib import Path
 from enum import Enum
@@ -81,7 +82,7 @@ def _auto_install_bcut_asr():
         # 运行安装脚本
         result = subprocess.run([
             sys.executable, str(script_path)
-        ], capture_output=True, text=True, timeout=600)  # 10分钟超时
+        ], capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=600)  # 10分钟超时
         
         if result.returncode == 0:
             logger.info("[OK] bcut-asr自动安装成功")
@@ -252,17 +253,17 @@ class SpeechRecognizer:
         self.available_methods = self._check_available_methods()
     
     def _check_available_methods(self) -> Dict[SpeechRecognitionMethod, bool]:
-        """检查可用的语音识别方法"""
+        """检查可用的语音识别方法（按优先级顺序检查）"""
         methods = {}
         
-        # 检查bcut-asr
+        # 检查FunASR（优先级最高，完全离线，中文识别准确率高）
+        methods[SpeechRecognitionMethod.FUNASR] = self._check_funasr_availability()
+        
+        # 检查bcut-asr（优先级次之，云服务但准确率高）
         methods[SpeechRecognitionMethod.BCUT_ASR] = self._check_bcut_asr_availability()
         
-        # 检查本地Whisper
+        # 检查本地Whisper（优先级较低，需要安装较大模型）
         methods[SpeechRecognitionMethod.WHISPER_LOCAL] = self._check_whisper_availability()
-        
-        # 检查FunASR
-        methods[SpeechRecognitionMethod.FUNASR] = self._check_funasr_availability()
         
         # 检查OpenAI API
         methods[SpeechRecognitionMethod.OPENAI_API] = self._check_openai_availability()
@@ -275,6 +276,13 @@ class SpeechRecognizer:
         
         # 检查阿里云语音识别
         methods[SpeechRecognitionMethod.ALIYUN_SPEECH] = self._check_aliyun_speech_availability()
+        
+        # 输出优先级摘要
+        available = [m.value for m, v in methods.items() if v]
+        if available:
+            logger.info(f"可用语音识别方法（按优先级）: {', '.join(available)}")
+        else:
+            logger.warning("没有可用的语音识别方法，请安装 FunASR、Whisper 或配置 API 密钥")
         
         return methods
     
@@ -294,18 +302,22 @@ class SpeechRecognizer:
     def _check_whisper_availability(self) -> bool:
         """检查本地Whisper是否可用"""
         try:
-            # 优先尝试导入whisper库（我们之前成功用过）
+            # 优先尝试导入whisper库
             import whisper
-            logger.info("[OK] whisper库已安装，可用")
+            logger.info("[OK] 本地Whisper已安装")
             return True
         except ImportError:
             try:
                 # 如果导入失败，再尝试命令行
                 result = subprocess.run(['whisper', '--help'], 
-                                      capture_output=True, text=True, timeout=5)
-                return result.returncode == 0
+                                      capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=5)
+                if result.returncode == 0:
+                    logger.info("[OK] Whisper命令行工具可用")
+                    return True
+                return False
             except (subprocess.TimeoutExpired, FileNotFoundError):
-                logger.warning("本地Whisper未安装或不可用")
+                # Whisper 不可用，但这是正常的，不算严重问题
+                logger.debug("本地Whisper未安装（可选）")
                 return False
     
     def _check_funasr_availability(self) -> bool:
@@ -359,10 +371,9 @@ class SpeechRecognizer:
             提取的音频文件路径
         """
         try:
-            # 检查ffmpeg是否可用
-            result = subprocess.run(['ffmpeg', '-version'], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
+            # 检查ffmpeg是否可用 - 使用shutil.which查找完整路径避免PATH问题
+            ffmpeg_path = shutil.which('ffmpeg')
+            if not ffmpeg_path:
                 raise SpeechRecognitionError("ffmpeg不可用，请安装ffmpeg")
             
             # 生成音频文件路径
@@ -376,9 +387,9 @@ class SpeechRecognizer:
             
             logger.info(f"正在从视频提取音频: {video_path} -> {audio_path}")
             
-            # 使用ffmpeg提取音频
+            # 使用ffmpeg提取音频（使用完整路径避免PATH问题）
             cmd = [
-                'ffmpeg',
+                ffmpeg_path,
                 '-i', str(video_path),
                 '-vn',  # 不处理视频流
                 '-acodec', 'pcm_s16le',  # 使用PCM 16位编码
@@ -388,7 +399,7 @@ class SpeechRecognizer:
                 str(audio_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=300)
             
             if result.returncode != 0:
                 raise SpeechRecognitionError(f"音频提取失败: {result.stderr}")
@@ -654,7 +665,7 @@ class SpeechRecognizer:
                 
                 logger.info(f"执行Whisper命令: {' '.join(cmd)}")
                 
-                result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(video_path.parent))
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', cwd=str(video_path.parent))
                 
                 if result.returncode == 0:
                     if output_path.exists():
