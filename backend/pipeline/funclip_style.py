@@ -491,13 +491,27 @@ class FunClipStyleProcessor:
             cleaned_srt = _clean_filler_words(srt_text)
             logger.info(f"预处理完成: {original_len} -> {len(cleaned_srt)} 字符 (剔除 {original_len - len(cleaned_srt)} 字符)")
 
-            # ===== 合并方案LLM调用 =====
+            enhanced_text = None
+            try:
+                from backend.pipeline.topic_precluster import TopicPreCluster
+                precluster = TopicPreCluster()
+                report = precluster.process(srt_text)
+                if report.clusters:
+                    logger.info(f"预聚类完成: {report.stats}")
+                    enhanced_text = report.enhanced_text
+                else:
+                    logger.info(f"预聚类: 未发现有效聚类 ({report.stats['total_entries']}条, {report.stats.get('coverage_ratio', 0):.0%}覆盖)")
+                    enhanced_text = cleaned_srt
+            except Exception as e:
+                logger.warning(f"预聚类失败，回退到清理后SRT: {e}")
+                enhanced_text = cleaned_srt
+
             logger.info("开始合并方案LLM调用（话题切分 + 标题生成 + 静音剔除）...")
-            logger.info(f"输入SRT文本长度: {len(cleaned_srt)} 字符")
+            logger.info(f"输入SRT文本长度: {len(enhanced_text)} 字符")
 
             response = self.llm_manager.current_provider.call(
                 FUNCLIP_MERGED_PROMPT,
-                {"text": "这是待分析剪辑的直播srt字幕：\n" + cleaned_srt}
+                {"text": "这是待分析剪辑的直播srt字幕：\n" + enhanced_text}
             )
 
             if not response or not response.content:

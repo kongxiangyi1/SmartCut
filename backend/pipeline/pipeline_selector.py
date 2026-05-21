@@ -30,33 +30,54 @@ class PipelineSelector:
     """
 
     def __init__(self):
-        self.mode = self._load_mode()  # 从配置文件加载模式
-        self.funclip_sub_mode = 'two_stage'  # funclip 子模式
-        self.ab_test_ratio = 0.1  # 10%流量用于A/B测试
-    
-    def _load_mode(self) -> str:
-        """从配置文件加载模式"""
+        self.mode = 'legacy'
+        self._funclip_sub_mode = 'two_stage'
+        self.ab_test_ratio = 0.1
+        self._load_mode()
+
+    @property
+    def funclip_sub_mode(self) -> str:
+        self._reload_lazy()
+        return self._funclip_sub_mode
+
+    @funclip_sub_mode.setter
+    def funclip_sub_mode(self, value: str):
+        self._funclip_sub_mode = value
+
+    def _reload_lazy(self):
+        """延迟重载：每次访问属性时检查配置文件是否有更新"""
         try:
             if CONFIG_FILE.exists():
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    self.funclip_sub_mode = config.get('funclip_sub_mode', 'two_stage')
-                    return config.get('mode', 'legacy')
+                self._funclip_sub_mode = config.get('funclip_sub_mode', 'two_stage')
+                self.mode = config.get('mode', 'legacy')
+        except Exception:
+            pass
+
+    def _load_mode(self):
+        """从配置文件加载模式（初始化用）"""
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self._funclip_sub_mode = config.get('funclip_sub_mode', 'two_stage')
+                    self.mode = config.get('mode', 'legacy')
+                    self.ab_test_ratio = config.get('ab_test_ratio', 0.1)
         except Exception as e:
             logger.warning(f"加载流水线模式失败: {e}")
-        return 'legacy'
     
     def _save_mode(self):
         """保存模式到配置文件"""
         try:
             config = {
                 'mode': self.mode,
-                'funclip_sub_mode': self.funclip_sub_mode,
+                'funclip_sub_mode': self._funclip_sub_mode,
                 'ab_test_ratio': self.ab_test_ratio
             }
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
-            logger.info(f"流水线模式已保存: mode={self.mode}, sub_mode={self.funclip_sub_mode}")
+            logger.info(f"流水线模式已保存: mode={self.mode}, sub_mode={self._funclip_sub_mode}")
         except Exception as e:
             logger.error(f"保存流水线模式失败: {e}")
     
@@ -66,7 +87,7 @@ class PipelineSelector:
         if ab_test_ratio is not None:
             self.ab_test_ratio = ab_test_ratio
         if funclip_sub_mode is not None:
-            self.funclip_sub_mode = funclip_sub_mode
+            self._funclip_sub_mode = funclip_sub_mode
         self._save_mode()
         logger.info(f"流水线模式已切换为: mode={mode}, sub_mode={self.funclip_sub_mode}")
     
