@@ -23,10 +23,15 @@ class PipelineSelector:
     - legacy: 使用原6步流水线
     - funclip: 使用FunClip风格的单步LLM流水线
     - ab_test: 同时运行两种流水线，用于对比
+
+    funclip 子模式（由 funclip_sub_mode 控制）：
+    - two_stage: 两阶段方案（默认，先识别边界再生成标题）
+    - merged: 合并方案（单次LLM调用完成所有任务）
     """
 
     def __init__(self):
         self.mode = self._load_mode()  # 从配置文件加载模式
+        self.funclip_sub_mode = 'two_stage'  # funclip 子模式
         self.ab_test_ratio = 0.1  # 10%流量用于A/B测试
     
     def _load_mode(self) -> str:
@@ -35,6 +40,7 @@ class PipelineSelector:
             if CONFIG_FILE.exists():
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                    self.funclip_sub_mode = config.get('funclip_sub_mode', 'two_stage')
                     return config.get('mode', 'legacy')
         except Exception as e:
             logger.warning(f"加载流水线模式失败: {e}")
@@ -45,21 +51,24 @@ class PipelineSelector:
         try:
             config = {
                 'mode': self.mode,
+                'funclip_sub_mode': self.funclip_sub_mode,
                 'ab_test_ratio': self.ab_test_ratio
             }
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
-            logger.info(f"流水线模式已保存: {self.mode}")
+            logger.info(f"流水线模式已保存: mode={self.mode}, sub_mode={self.funclip_sub_mode}")
         except Exception as e:
             logger.error(f"保存流水线模式失败: {e}")
     
-    def set_mode(self, mode: str, ab_test_ratio: float = None):
+    def set_mode(self, mode: str, ab_test_ratio: float = None, funclip_sub_mode: str = None):
         """设置流水线模式"""
         self.mode = mode
         if ab_test_ratio is not None:
             self.ab_test_ratio = ab_test_ratio
+        if funclip_sub_mode is not None:
+            self.funclip_sub_mode = funclip_sub_mode
         self._save_mode()
-        logger.info(f"流水线模式已切换为: {mode}")
+        logger.info(f"流水线模式已切换为: mode={mode}, sub_mode={self.funclip_sub_mode}")
     
     def select_pipeline(self, project_id: str) -> str:
         """

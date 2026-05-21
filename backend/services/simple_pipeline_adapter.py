@@ -123,6 +123,15 @@ class SimplePipelineAdapter:
         try:
             from backend.pipeline.funclip_style import run_funclip_pipeline
             
+            # 获取处理模式（从全局选择器读取）
+            from backend.pipeline.pipeline_selector import get_pipeline_selector
+            selector = get_pipeline_selector()
+            pipeline_mode = selector.select_pipeline(self.project_id)
+            # funclip 模式下再细分 two_stage / merged
+            funclip_sub_mode = getattr(selector, 'funclip_sub_mode', 'two_stage')
+            
+            logger.info(f"FunClip子模式: {funclip_sub_mode}")
+            
             # 阶段1: 素材准备
             emit_progress(self.project_id, "INGEST", "素材准备完成")
             
@@ -162,7 +171,8 @@ class SimplePipelineAdapter:
                 video_path=Path(input_video_path),
                 metadata_dir=metadata_dir,
                 clips_output_dir=clips_output_dir,
-                collections_output_dir=collections_output_dir
+                collections_output_dir=collections_output_dir,
+                processing_mode=funclip_sub_mode
             )
             
             emit_progress(self.project_id, "ANALYZE", "内容分析完成", subpercent=85)
