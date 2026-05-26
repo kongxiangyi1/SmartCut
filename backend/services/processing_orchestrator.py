@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from backend.models.task import Task, TaskStatus, TaskType
 from backend.repositories.task_repository import TaskRepository
 from backend.services.config_manager import ProjectConfigManager, ProcessingStep
-# from backend.services.pipeline_adapter import PipelineAdapter  # 临时注释，文件不存在
+from backend.services.pipeline_adapter import PipelineAdapter
 from backend.core.config import get_project_root
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class ProcessingOrchestrator:
         
         # 初始化组件
         self.config_manager = ProjectConfigManager(project_id)
-        # self.adapter = PipelineAdapter(db, task_id, project_id)  # 临时注释，文件不存在
+        self.adapter = PipelineAdapter(db, task_id, project_id)
         self.task_repo = TaskRepository(db)
         
         # 步骤映射
@@ -281,8 +281,196 @@ class ProcessingOrchestrator:
             # 更新步骤状态为失败
             self._update_step_status(step, "failed", execution_time=execution_time, error=str(e))
             
+            # 尝试降级机制
+            fallback_result = self._try_fallback_strategy(step, adapted_params, e)
+            if fallback_result:
+                logger.info(f"步骤 {step_name} 降级执行成功，使用降级策略")
+                return {
+                    "step": step_name,
+                    "status": "degraded",
+                    "execution_time": execution_time,
+                    "result": fallback_result,
+                    "fallback": True,
+                    "original_error": str(e)
+                }
+            
+            # 降级也失败，记录错误并继续抛出
             self._update_task_status(TaskStatus.FAILED, error_message=str(e))
             raise
+    
+    def _try_fallback_strategy(self, step: ProcessingStep, adapted_params: Dict[str, Any], original_error: Exception) -> Optional[Dict[str, Any]]:
+        """
+        尝试降级策略处理步骤失败
+        
+        Args:
+            step: 当前步骤
+            adapted_params: 原始参数
+            original_error: 原始错误
+            
+        Returns:
+            降级处理结果，失败返回None
+        """
+        logger.info(f"开始尝试降级策略处理步骤 {step.value}")
+        
+        try:
+            # 根据不同步骤类型尝试不同的降级策略
+            if step == ProcessingStep.STEP3_SCORING:
+                return self._fallback_scoring(adapted_params)
+            elif step == ProcessingStep.STEP4_TITLE:
+                return self._fallback_title_generation(adapted_params)
+            elif step == ProcessingStep.STEP5_CLUSTERING:
+                return self._fallback_clustering(adapted_params)
+            elif step == ProcessingStep.STEP6_VIDEO:
+                return self._fallback_video_generation(adapted_params)
+            else:
+                logger.warning(f"步骤 {step.value} 没有定义降级策略")
+                return None
+                
+        except Exception as fallback_error:
+            logger.error(f"降级策略执行失败: {fallback_error}")
+            return None
+    
+    def _fallback_scoring(self, adapted_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        评分步骤的降级策略：使用基于字幕长度和音频能量的简单评分
+        """
+        logger.info("执行评分降级策略：使用基于字幕长度的评分")
+        
+        try:
+            # 获取step2的时间线数据
+            timeline_data = self.adapter.get_step_result(ProcessingStep.STEP2_TIMELINE.value)
+            if not timeline_data:
+                logger.error("无法获取时间线数据，降级失败")
+                return None
+            
+            scored_segments = []
+            for segment in timeline_data:
+                # 基于字幕长度评分：长度适中的片段得分更高
+                duration = segment.get('duration', 0)
+                content_length = len(segment.get('content', ''))
+                
+                # 简单评分：30-120秒的内容得分最高
+                if 30 <= duration <= 120:
+                    score = 7.0 + (1.0 - abs(duration - 60) / 60) * 2.0
+                elif duration < 30:
+                    score = 5.0 + (duration / 30) * 2.0
+                else:
+                    score = 6.0 - min((duration - 120) / 120, 0.5)
+                
+                # 考虑内容长度
+                if content_length > 50:
+                    score += 0.5
+                elif content_length < 20:
+                    score -= 0.5
+                
+                scored_segments.append({
+                    **segment,
+                    'score': round(score, 2),
+                    'final_score': round(score, 2),
+                    'score_source': 'fallback_length_based'
+                })
+            
+            return {'segments': scored_segments, 'degraded': True}
+            
+        except Exception as e:
+            logger.error(f"评分降级失败: {e}")
+            return None
+    
+    def _fallback_title_generation(self, adapted_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        标题生成步骤的降级策略：使用第一个字幕片段的前N个字作为标题
+        """
+        logger.info("执行标题生成降级策略：使用字幕片段生成标题")
+        
+        try:
+            # 获取step3的评分数据
+            scored_data = self.adapter.get_step_result(ProcessingStep.STEP3_SCORING.value)
+            if not scored_data:
+                logger.error("无法获取评分数据，降级失败")
+                return None
+            
+            clips_with_titles = []
+            for segment in scored_data.get('segments', scored_data):
+                content = segment.get('content', '')
+                if not content:
+                    continue
+                
+                # 使用前30个字作为标题
+                title = content[:30] + ('...' if len(content) > 30 else '')
+                
+                clips_with_titles.append({
+                    **segment,
+                    'generated_title': title,
+                    'title_source': 'fallback_first_segment'
+                })
+            
+            return {'clips': clips_with_titles, 'degraded': True}
+            
+        except Exception as e:
+            logger.error(f"标题生成降级失败: {e}")
+            return None
+    
+    def _fallback_clustering(self, adapted_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        聚类步骤的降级策略：使用时间顺序聚类，每N个片段一组
+        """
+        logger.info("执行聚类降级策略：使用时间顺序聚类")
+        
+        try:
+            # 获取step4的标题数据
+            titled_data = self.adapter.get_step_result(ProcessingStep.STEP4_TITLE.value)
+            if not titled_data:
+                logger.error("无法获取标题数据，降级失败")
+                return None
+            
+            clips = titled_data.get('clips', [])
+            if not clips:
+                clips = titled_data if isinstance(titled_data, list) else []
+            
+            # 按评分排序，取前N个
+            sorted_clips = sorted(clips, key=lambda x: x.get('score', 0), reverse=True)
+            top_clips = sorted_clips[:20]  # 最多20个切片
+            
+            # 时间顺序聚类：按开始时间排序
+            top_clips.sort(key=lambda x: x.get('start_time', ''))
+            
+            # 分组：每3个为一组
+            collections = []
+            for i in range(0, len(top_clips), 3):
+                group = top_clips[i:i+3]
+                collection_id = f"col_{i//3 + 1}"
+                collections.append({
+                    'id': collection_id,
+                    'collection_title': f'合集 {i//3 + 1}',
+                    'clip_ids': [clip['id'] for clip in group],
+                    'cluster_source': 'fallback_time_order'
+                })
+            
+            return {'collections': collections, 'degraded': True}
+            
+        except Exception as e:
+            logger.error(f"聚类降级失败: {e}")
+            return None
+    
+    def _fallback_video_generation(self, adapted_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        视频生成步骤的降级策略：确保静音处理是必选的
+        """
+        logger.info("执行视频生成降级策略：使用标准切片（静音处理必选）")
+        
+        try:
+            # 直接返回适配器的原始数据
+            # 静音处理在 video_processor 中已经是默认行为
+            clusters_data = self.adapter.get_step_result(ProcessingStep.STEP5_CLUSTERING.value)
+            if not clusters_data:
+                logger.error("无法获取聚类数据，降级失败")
+                return None
+            
+            return {'clusters': clusters_data, 'degraded': True, 'silence_processing': 'mandatory'}
+            
+        except Exception as e:
+            logger.error(f"视频生成降级失败: {e}")
+            return None
     
     def execute_pipeline(self, srt_path: Path, steps_to_execute: Optional[List[ProcessingStep]] = None) -> Dict[str, Any]:
         """

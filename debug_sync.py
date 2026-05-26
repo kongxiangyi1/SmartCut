@@ -33,7 +33,7 @@ for clip in clips_with_titles:
 processor = VideoProcessor(clips_dir=str(clips_dir), collections_dir=str(clips_dir.parent / 'collections'))
 
 # 调用 batch_extract_clips（串行处理，因为只有3个切片）
-successful_clips = processor.batch_extract_clips(input_video, clips_data, apply_silence_processing=False)
+successful_clips, clips_data = processor.batch_extract_clips(input_video, clips_data)
 
 print('\n\nbatch_extract_clips 返回后 clips_data:')
 for clip in clips_data:

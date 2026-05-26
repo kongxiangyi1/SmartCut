@@ -111,7 +111,7 @@ SPEECH_RECOGNITION_TIMEOUT = int(os.getenv("SPEECH_RECOGNITION_TIMEOUT", "1000")
 
 # 处理参数
 CHUNK_SIZE = 5000  # 文本分块大小
-MIN_SCORE_THRESHOLD = 0.0  # 最低评分阈值（设置为0以允许所有评分通过）
+MIN_SCORE_THRESHOLD = 0.5  # 最低评分阈值（0-1范围，低于0.5的切片将被过滤）
 MAX_CLIPS_PER_COLLECTION = 5  # 每个合集最大切片数
 
 # 新增：话题提取控制参数

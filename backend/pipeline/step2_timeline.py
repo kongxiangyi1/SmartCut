@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 class TimelineExtractor:
     """从大纲和SRT字幕中提取精确时间线（方案A-轻量化）"""
 
-    def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None):
+    def __init__(self, metadata_dir: Path = None, prompt_files: Dict = None, video_path: Path = None):
         self.llm_manager = LLMManager()
         self.text_processor = TextProcessor()
+        self.video_path = video_path
 
         # 使用传入的metadata_dir或默认值
         if metadata_dir is None:
@@ -61,6 +62,21 @@ class TimelineExtractor:
         # 【方案A】使用轻量化说话人识别器
         self.speaker_recognizer = SimpleSpeakerRecognizer(n_clusters=2)
         self.srt_with_speakers = None
+        
+        # 【新增】初始化关键帧对齐器（懒加载）
+        self.keyframe_analyzer = None
+        if self.video_path and self.video_path.exists():
+            try:
+                from ..utils.keyframe_aligner import KeyframeAligner
+                self.keyframe_analyzer = KeyframeAligner(
+                    self.video_path,
+                    cache_dir=self.metadata_dir / "keyframe_cache",
+                    lazy_load=True  # 懒加载
+                )
+                logger.info(f"关键帧对齐器已初始化（懒加载模式）: {self.video_path.name}")
+            except Exception as e:
+                logger.warning(f"关键帧对齐器初始化失败: {e}")
+                self.keyframe_analyzer = None
 
     def extract_timeline(self, outlines: List[Dict]) -> List[Dict]:
         """
@@ -297,6 +313,12 @@ class TimelineExtractor:
             # 输出说话人统计
             speaker_stats = get_speaker_statistics(all_timeline_data)
             logger.info(f"说话人统计: {speaker_stats}")
+
+        # 9. 【新增】关键帧辅助验证（提供对齐建议但不修改原始边界）
+        if all_timeline_data and self.keyframe_analyzer:
+            logger.info("使用关键帧信息验证话题边界...")
+            all_timeline_data = self._validate_with_keyframes(all_timeline_data)
+            logger.info("关键帧边界验证完成。")
 
         return all_timeline_data
         
@@ -1025,16 +1047,87 @@ class TimelineExtractor:
         except Exception as e:
             logger.warning(f"  > [双重提示词] 增强提示词构建失败: {e}")
             return original_prompt
+    
+    def _validate_with_keyframes(self, timeline_data: List[Dict]) -> List[Dict]:
+        """
+        【新增】使用关键帧信息验证和微调时间线
+        
+        此方法仅提供对齐建议，不修改原始边界。
+        实际的对齐在 Step6 视频生成时执行。
+        
+        Args:
+            timeline_data: 时间线数据
+            
+        Returns:
+            添加了关键帧分析信息的原始时间线
+        """
+        try:
+            if not self.keyframe_analyzer:
+                return timeline_data
+            
+            self.keyframe_analyzer.ensure_initialized()
+            
+            for topic in timeline_data:
+                start_sec = self.text_processor.time_to_seconds(topic.get('start_time', '00:00:00,000'))
+                end_sec = self.text_processor.time_to_seconds(topic.get('end_time', '00:00:00,000'))
+                
+                # 执行关键帧对齐（使用balanced策略）
+                aligned = self.keyframe_analyzer.align_boundary(
+                    start_sec, end_sec, 
+                    strategy="balanced"
+                )
+                
+                # 添加建议信息（不修改原始边界）
+                topic['keyframe_analysis_available'] = True
+                topic['keyframe_suggestion'] = {
+                    'suggested_start': self._seconds_to_time(aligned.aligned_start),
+                    'suggested_end': self._seconds_to_time(aligned.aligned_end),
+                    'start_expansion': round(aligned.start_expansion, 3),
+                    'end_expansion': round(aligned.end_expansion, 3),
+                    'alignment_strategy': 'balanced'
+                }
+                
+                # 如果扩展量较大，添加警告
+                if aligned.start_expansion > 2.5 or aligned.end_expansion > 2.5:
+                    topic['keyframe_warning'] = 'large_expansion'
+                    logger.debug(
+                        f"  > 话题 '{topic.get('outline', '')[:30]}...' "
+                        f"关键帧对齐扩展较大: +{aligned.start_expansion:.3f}s / +{aligned.end_expansion:.3f}s"
+                    )
+            
+            # 输出关键帧统计信息
+            stats = self.keyframe_analyzer.get_keyframe_statistics()
+            logger.info(
+                f"关键帧统计: {stats['count']} 个I帧, "
+                f"平均间隔 {stats.get('avg_interval', 0):.2f}s, "
+                f"视频时长 {stats.get('duration', 0):.2f}s"
+            )
+            
+            return timeline_data
+            
+        except Exception as e:
+            logger.warning(f"关键帧验证失败: {e}")
+            return timeline_data
 
-def run_step2_timeline(outline_path: Path, metadata_dir: Path = None, output_path: Optional[Path] = None, prompt_files: Dict = None) -> List[Dict]:
+def run_step2_timeline(outline_path: Path, metadata_dir: Path = None, output_path: Optional[Path] = None, prompt_files: Dict = None, video_path: Path = None) -> List[Dict]:
     """
     运行Step 2: 时间点提取
+    
+    Args:
+        outline_path: 大纲文件路径
+        metadata_dir: 元数据目录
+        output_path: 输出文件路径
+        prompt_files: 提示词文件字典
+        video_path: 视频文件路径（用于关键帧对齐）
+    
+    Returns:
+        时间线数据列表
     """
     if metadata_dir is None:
         from ..core.shared_config import METADATA_DIR
         metadata_dir = METADATA_DIR
         
-    extractor = TimelineExtractor(metadata_dir, prompt_files)
+    extractor = TimelineExtractor(metadata_dir, prompt_files, video_path)
     
     # 加载大纲
     with open(outline_path, 'r', encoding='utf-8') as f:

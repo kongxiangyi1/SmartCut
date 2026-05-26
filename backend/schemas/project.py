@@ -92,3 +92,8 @@ class ProjectFilter(BaseSchema):
     status: Optional[ProjectStatus] = Field(default=None, description="Filter by status")
     project_type: Optional[ProjectType] = Field(default=None, description="Filter by project type")
     search: Optional[str] = Field(default=None, description="Search in name and description")
+
+
+class BatchDeleteRequest(BaseSchema):
+    """Schema for batch delete request."""
+    project_ids: List[str] = Field(..., min_length=1, max_length=50, description="List of project IDs to delete")

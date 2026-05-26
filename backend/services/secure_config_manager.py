@@ -44,6 +44,7 @@ class SecureConfigManager:
         'api_siliconflow_api_key',
         'api_zhipu_api_key',
         'api_tencent_api_key',
+        'api_ollama_api_key',
     ]
     
     def __new__(cls):

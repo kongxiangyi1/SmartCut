@@ -181,6 +181,7 @@ class DataSyncService:
                 logger.warning(f"项目 {project_id} 切片数据格式不正确")
                 return 0
             
+            clips_to_add = []
             synced_count = 0
             updated_count = 0
             for clip_data in clips_data:
@@ -269,13 +270,16 @@ class DataSyncService:
                         status=ClipStatus.COMPLETED
                     )
                     
-                    self.db.add(clip)
+                    clips_to_add.append(clip)
                     synced_count += 1
+                    # 确保tags是空列表而不是null
                     
                 except Exception as e:
                     logger.error(f"同步切片失败: {e}")
                     continue
-            
+
+            if clips_to_add:
+                self.db.bulk_save_objects(clips_to_add)
             self.db.commit()
             logger.info(f"项目 {project_id} 同步了 {synced_count} 个切片，更新了 {updated_count} 个切片")
             return synced_count
@@ -332,6 +336,7 @@ class DataSyncService:
                 except Exception as e:
                     logger.warning(f"读取删除记录失败: {e}")
             
+            collections_to_add = []
             synced_count = 0
             for collection_data in collections_data:
                 try:

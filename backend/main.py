@@ -70,9 +70,10 @@ async def startup_event():
     else:
         logger.warning("未找到API密钥配置")
 
-    # 预加载语音识别模型（避免首次调用延迟）- 暂时禁用以加快测试
-    # await preload_speech_models()
-    logger.info("语音识别模型预加载已跳过")
+    # 启动时预加载语音识别模型（避免首次调用延迟）
+    import asyncio
+    asyncio.create_task(preload_speech_models())
+    logger.info("语音识别模型预加载已在后台启动")
 
     # 启动WebSocket网关服务 - 已禁用，使用新的简化进度系统
     logger.info("WebSocket网关服务已禁用，使用新的简化进度系统")

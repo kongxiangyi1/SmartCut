@@ -63,9 +63,8 @@ def test_parallel_extraction():
     print("\n[测试1] 串行提取")
     print("-" * 40)
     start_time = time.time()
-    successful_clips_seq = processor.batch_extract_clips(
-        input_video, clips_data,
-        apply_silence_processing=False  # 禁用静音处理以专注测试提取速度
+    successful_clips_seq, _ = processor.batch_extract_clips(
+        input_video, clips_data
     )
     seq_time = time.time() - start_time
     print(f"\n串行提取完成，耗时: {seq_time:.2f}秒，成功: {len(successful_clips_seq)}个")

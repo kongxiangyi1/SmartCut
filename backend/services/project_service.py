@@ -337,10 +337,13 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
                 # 5. 提交事务
                 self.db.commit()
                 
-                # 6. 删除项目文件
+                # 6. 清理项目临时文件和中间产物
+                self._cleanup_project_files(project_id)
+                
+                # 7. 删除项目文件（目录整体删除）
                 self._delete_project_files(project_id)
                 
-                # 7. 清理进度数据
+                # 8. 清理进度数据
                 self._cleanup_project_progress(project_id)
                 
                 logger.info(f"项目 {project_id} 删除成功")
@@ -355,9 +358,66 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             logger.error(f"删除项目 {project_id} 时发生错误: {str(e)}")
             return False
     
+    def _cleanup_project_files(self, project_id: str):
+        """
+        全面清理项目相关的临时文件和中间产物
+        
+        在数据库事务提交后调用，确保即使清理失败也不影响已提交的数据库操作。
+        优先清理temp目录下的中间文件，再由 _delete_project_files 处理整个项目目录删除。
+        
+        Args:
+            project_id: 项目ID
+        """
+        try:
+            project_dir = Path(f"data/projects/{project_id}")
+            
+            if not project_dir.exists():
+                logger.info(f"项目目录不存在，无需清理临时文件: {project_dir}")
+                return
+            
+            # 清理temp目录（包含所有中间文件：step1_chunks, step1_srt_chunks, debug_responses等）
+            temp_dir = project_dir / "temp"
+            if temp_dir.exists():
+                # 逐个子目录清理并记录日志，便于排查问题
+                temp_subdirs = ["step1_chunks", "step1_srt_chunks", "debug_responses", "step2_segments", "step3_clips"]
+                for subdir_name in temp_subdirs:
+                    subdir = temp_dir / subdir_name
+                    if subdir.exists():
+                        file_count = sum(1 for _ in subdir.rglob("*"))
+                        shutil.rmtree(subdir, ignore_errors=True)
+                        logger.info(f"已清理项目 {project_id} 的 temp/{subdir_name} 目录（{file_count} 个文件）")
+                
+                # 清理temp目录中剩余的文件
+                remaining = list(temp_dir.rglob("*"))
+                if remaining:
+                    logger.info(f"清理项目 {project_id} 的 temp 目录剩余文件（{len(remaining)} 个）")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.info(f"已清理项目 {project_id} 的 temp 目录")
+            
+            # 清理output目录中的切片视频文件
+            output_dir = project_dir / "output"
+            if output_dir.exists():
+                shutil.rmtree(output_dir, ignore_errors=True)
+                logger.info(f"已清理项目 {project_id} 的 output 目录")
+            
+            # 清理上传的原始视频文件
+            uploads_dir = project_dir / "uploads"
+            if uploads_dir.exists():
+                shutil.rmtree(uploads_dir, ignore_errors=True)
+                logger.info(f"已清理项目 {project_id} 的 uploads 目录")
+            
+            logger.info(f"项目 {project_id} 的临时文件和中间产物清理完成")
+            
+        except Exception as e:
+            logger.error(f"清理项目 {project_id} 临时文件时发生错误: {str(e)}")
+            # 不抛出异常，让后续删除流程继续进行
+    
     def _delete_project_files(self, project_id: str):
         """
-        删除项目相关的文件
+        删除项目相关的文件（整体目录删除，作为最终清理步骤）
+        
+        在 _cleanup_project_files 之后调用，确保即使部分文件已被清理，
+        也能删除剩余的项目目录。
         
         Args:
             project_id: 项目ID
@@ -368,38 +428,42 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             
             if project_dir.exists():
                 logger.info(f"删除项目目录: {project_dir}")
-                shutil.rmtree(project_dir)
+                shutil.rmtree(project_dir, ignore_errors=True)
+                logger.info(f"项目目录已删除: {project_dir}")
             else:
-                logger.info(f"项目目录不存在: {project_dir}")
+                logger.info(f"项目目录不存在（可能已被清理）: {project_dir}")
             
             # 删除全局输出目录中的相关文件（如果存在）
             # 注意：现在主要使用项目内目录，但保留对全局目录的清理以防遗留文件
-            from ..core.path_utils import get_data_directory
-            data_dir = get_data_directory()
-            global_clips_dir = data_dir / "output" / "clips"
-            global_collections_dir = data_dir / "output" / "collections"
-            
-            # 删除全局输出目录中属于该项目的切片文件
-            if global_clips_dir.exists():
-                for clip_file in global_clips_dir.glob(f"*_{project_id}*"):
-                    try:
-                        clip_file.unlink()
-                        logger.info(f"删除全局切片文件: {clip_file}")
-                    except Exception as e:
-                        logger.warning(f"删除全局切片文件失败 {clip_file}: {e}")
-            
-            # 删除全局输出目录中属于该项目的合集文件
-            if global_collections_dir.exists():
-                for collection_file in global_collections_dir.glob(f"*_{project_id}*"):
-                    try:
-                        collection_file.unlink()
-                        logger.info(f"删除全局合集文件: {collection_file}")
-                    except Exception as e:
-                        logger.warning(f"删除全局合集文件失败 {collection_file}: {e}")
+            try:
+                from ..core.path_utils import get_data_directory
+                data_dir = get_data_directory()
+                global_clips_dir = data_dir / "output" / "clips"
+                global_collections_dir = data_dir / "output" / "collections"
+                
+                # 删除全局输出目录中属于该项目的切片文件
+                if global_clips_dir.exists():
+                    for clip_file in global_clips_dir.glob(f"*_{project_id}*"):
+                        try:
+                            clip_file.unlink()
+                            logger.info(f"删除全局切片文件: {clip_file}")
+                        except Exception as e:
+                            logger.warning(f"删除全局切片文件失败 {clip_file}: {e}")
+                
+                # 删除全局输出目录中属于该项目的合集文件
+                if global_collections_dir.exists():
+                    for collection_file in global_collections_dir.glob(f"*_{project_id}*"):
+                        try:
+                            collection_file.unlink()
+                            logger.info(f"删除全局合集文件: {collection_file}")
+                        except Exception as e:
+                            logger.warning(f"删除全局合集文件失败 {collection_file}: {e}")
+            except Exception as e:
+                logger.warning(f"清理全局输出目录失败: {e}")
             
         except Exception as e:
             logger.error(f"删除项目文件时发生错误: {str(e)}")
-            # 不抛出异常，让数据库删除继续进行
+            # 不抛出异常，让删除流程继续进行
     
     def _cleanup_project_progress(self, project_id: str):
         """
@@ -417,16 +481,52 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             except Exception as e:
                 logger.warning(f"清理Redis进度数据失败: {e}")
             
-            # 清理增强进度服务中的缓存
+            # 清理增强进度服务中的缓存（使用服务提供的 clear_progress 方法）
             try:
                 from ..services.enhanced_progress_service import progress_service
-                if project_id in progress_service.progress_cache:
-                    del progress_service.progress_cache[project_id]
-                    logger.info(f"清理项目 {project_id} 的内存进度缓存")
+                progress_service.clear_progress(project_id)
+                logger.info(f"清理项目 {project_id} 的内存进度缓存")
             except Exception as e:
                 logger.warning(f"清理内存进度缓存失败: {e}")
             
         except Exception as e:
             logger.error(f"清理项目进度数据失败: {str(e)}")
+    
+    def batch_delete_projects(self, project_ids: List[str]) -> Dict[str, Any]:
+        """
+        批量删除项目
+        
+        Args:
+            project_ids: 项目ID列表
+            
+        Returns:
+            {
+                "success_count": 成功删除数,
+                "fail_count": 失败数,
+                "fail_details": [{"id": "...", "reason": "..."}]
+            }
+        """
+        success_count = 0
+        fail_count = 0
+        fail_details = []
+
+        for project_id in project_ids:
+            try:
+                ok = self.delete_project_with_files(project_id)
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    fail_details.append({"id": project_id, "reason": "项目不存在或无法删除"})
+            except Exception as e:
+                fail_count += 1
+                fail_details.append({"id": project_id, "reason": str(e)[:200]})
+                logger.error(f"批量删除项目 {project_id} 失败: {e}")
+
+        return {
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "fail_details": fail_details
+        }
     
  

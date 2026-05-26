@@ -17,6 +17,11 @@ taskkill /F /FI "WINDOWTITLE eq Backend*" >nul 2>&1
 echo 后端 API 已停止
 
 echo.
+echo 停止前端开发服务器...
+taskkill /F /FI "WINDOWTITLE eq Frontend*" >nul 2>&1
+echo 前端服务已停止
+
+echo.
 echo 停止 Redis (可选)...
 echo 如果需要停止 Redis, 请手动运行: redis-cli shutdown
 echo.

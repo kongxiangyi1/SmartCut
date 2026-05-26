@@ -4,6 +4,8 @@
 """
 
 import logging
+import json
+from pathlib import Path
 from typing import List, Dict, Any
 from fastapi import APIRouter, HTTPException
 
@@ -55,7 +57,9 @@ def get_llm_config_status():
             'gemini': 'api_gemini_api_key',
             'siliconflow': 'api_siliconflow_api_key',
             'zhipu': 'api_zhipu_api_key',
-            'tencent': 'api_tencent_api_key'
+            'tencent': 'api_tencent_api_key',
+            'ollama': 'api_ollama_api_key',
+            'lmstudio': 'api_lmstudio_api_key',
         }
         
         key_name = provider_key_map.get(llm_provider, 'api_dashscope_api_key')
@@ -152,12 +156,16 @@ def get_secure_settings():
             "api_siliconflow_api_key": secure_manager.mask_sensitive_value('api_siliconflow_api_key'),
             "api_zhipu_api_key": secure_manager.mask_sensitive_value('api_zhipu_api_key'),
             "api_tencent_api_key": secure_manager.mask_sensitive_value('api_tencent_api_key'),
+            "api_ollama_api_key": secure_manager.mask_sensitive_value('api_ollama_api_key'),
             "dashscope_api_key": secure_manager.mask_sensitive_value('api_dashscope_api_key'),
             "openai_api_key": secure_manager.mask_sensitive_value('api_openai_api_key'),
             "gemini_api_key": secure_manager.mask_sensitive_value('api_gemini_api_key'),
             "siliconflow_api_key": secure_manager.mask_sensitive_value('api_siliconflow_api_key'),
             "zhipu_api_key": secure_manager.mask_sensitive_value('api_zhipu_api_key'),
             "tencent_api_key": secure_manager.mask_sensitive_value('api_tencent_api_key'),
+            "ollama_api_key": secure_manager.mask_sensitive_value('api_ollama_api_key'),
+            "ollama_base_url": secure_manager.get('ollama_base_url', 'http://localhost:11434/v1'),
+            "ollama_cached_models": secure_manager.get('ollama_cached_models', '[]'),
             # 标记是否有密钥（用于前端判断）
             "has_dashscope_key": secure_manager.has_sensitive_value('api_dashscope_api_key') or bool(settings.api_dashscope_api_key),
             "has_openai_key": secure_manager.has_sensitive_value('api_openai_api_key'),
@@ -165,6 +173,7 @@ def get_secure_settings():
             "has_siliconflow_key": secure_manager.has_sensitive_value('api_siliconflow_api_key'),
             "has_zhipu_key": secure_manager.has_sensitive_value('api_zhipu_api_key'),
             "has_tencent_key": secure_manager.has_sensitive_value('api_tencent_api_key'),
+            "has_ollama_key": secure_manager.has_sensitive_value('api_ollama_api_key'),
         }
         
         logger.info("安全配置获取成功")
@@ -207,6 +216,8 @@ def get_settings():
             "api_siliconflow_api_key": secure_manager.get_sensitive_value('api_siliconflow_api_key'),
             "api_zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "api_tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
+            "api_ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
+            "api_lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
             # 同时返回无 api_ 前缀的格式兼容前端
             "dashscope_api_key": settings.api_dashscope_api_key or secure_manager.get_sensitive_value('api_dashscope_api_key'),
             "openai_api_key": secure_manager.get_sensitive_value('api_openai_api_key'),
@@ -214,6 +225,12 @@ def get_settings():
             "siliconflow_api_key": secure_manager.get_sensitive_value('api_siliconflow_api_key'),
             "zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
+            "ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
+            "lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
+            "ollama_base_url": secure_manager.get('ollama_base_url', 'http://localhost:11434/v1'),
+            "lmstudio_base_url": secure_manager.get('lmstudio_base_url', 'http://localhost:1234/v1'),
+            "ollama_cached_models": secure_manager.get('ollama_cached_models', '[]'),
+            "lmstudio_cached_models": secure_manager.get('lmstudio_cached_models', '[]'),
         }
     except Exception as e:
         logger.error(f"获取配置失败: {e}", exc_info=True)
@@ -239,6 +256,8 @@ def update_settings(settings_data: Dict[str, Any]):
             'siliconflow_api_key': 'api_siliconflow_api_key',
             'zhipu_api_key': 'api_zhipu_api_key',
             'tencent_api_key': 'api_tencent_api_key',
+            'ollama_api_key': 'api_ollama_api_key',
+            'lmstudio_api_key': 'api_lmstudio_api_key',
         }
         
         for frontend_field, backend_field in field_mapping.items():
@@ -247,7 +266,19 @@ def update_settings(settings_data: Dict[str, Any]):
         
         # 使用安全配置管理器保存（自动加密敏感字段）
         secure_manager.update(settings_data)
-        
+
+        # 同步非敏感字段到 settings.json（LLMManager 从该文件读取）
+        _sync_settings_to_json(settings_data)
+
+        # 同步运行中的 LLMManager，使新配置立即生效
+        from backend.core.llm_manager import get_llm_manager
+        try:
+            llm_manager = get_llm_manager()
+            llm_manager.update_settings(settings_data)
+            logger.info(f"LLMManager 已更新: {settings_data.get('llm_provider')} / {settings_data.get('model_name')}")
+        except Exception as e:
+            logger.warning(f"LLMManager 更新失败（不影响配置保存）: {e}")
+
         return {
             "success": True,
             "message": "配置保存成功",
@@ -256,6 +287,33 @@ def update_settings(settings_data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"更新配置失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _sync_settings_to_json(settings_data: Dict[str, Any]):
+    """将非敏感配置同步到 settings.json（供 LLMManager 读取）"""
+    try:
+        settings_path = Path(__file__).parent.parent.parent.parent / "data" / "settings.json"
+        if not settings_path.exists():
+            return
+
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            current = json.load(f)
+
+        # 只同步非敏感字段（敏感字段由 secure_config_manager 管理）
+        sync_fields = {'llm_provider', 'model_name', 'ollama_base_url', 'lmstudio_base_url',
+                       'chunk_size', 'min_score_threshold', 'max_clips_per_collection'}
+        changed = False
+        for key in sync_fields:
+            if key in settings_data and settings_data[key] != current.get(key):
+                current[key] = settings_data[key]
+                changed = True
+
+        if changed:
+            with open(settings_path, 'w', encoding='utf-8') as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+            logger.info(f"已同步非敏感配置到 settings.json")
+    except Exception as e:
+        logger.warning(f"同步配置到 settings.json 失败: {e}")
 
 
 @router.post("/test-api-key")
@@ -267,9 +325,66 @@ def test_api_key(data: Dict[str, Any]):
         provider = data.get("provider", "")
         api_key = data.get("api_key", "")
         model_name = data.get("model_name", "")
-        secret_key = data.get("secret_key")
         
         logger.info(f"测试API密钥: provider={provider}, model={model_name}")
+        
+        # Ollama/LM Studio是本地模型，不需要API Key
+        if provider == "ollama":
+            try:
+                import requests
+                base_url = data.get("base_url", "http://localhost:11434/v1")
+                # 测试Ollama服务是否在运行
+                resp = requests.get(base_url.replace("/v1", "") + "/api/tags", timeout=5)
+                if resp.status_code == 200:
+                    return {
+                        "success": True,
+                        "message": f"Ollama连接成功，已安装 {len(resp.json().get('models', []))} 个模型"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Ollama服务返回异常: {resp.status_code}"
+                    }
+            except requests.exceptions.ConnectionError:
+                return {
+                    "success": False,
+                    "error": f"无法连接Ollama服务 ({base_url})，请确认Ollama已启动"
+                }
+            except Exception as e:
+                logger.error(f"Ollama连接测试失败: {e}")
+                return {
+                    "success": False,
+                    "error": f"Ollama连接测试失败: {str(e)}"
+                }
+
+        if provider == "lmstudio":
+            try:
+                import requests
+                base_url = data.get("base_url", "http://localhost:1234/v1")
+                base_url = base_url.rstrip('/') if base_url else "http://localhost:1234/v1"
+                resp = requests.get(f"{base_url}/models", timeout=10)
+                if resp.status_code == 200:
+                    models = resp.json().get("data", [])
+                    return {
+                        "success": True,
+                        "message": f"LM Studio连接成功，已加载 {len(models)} 个模型"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"LM Studio返回异常: {resp.status_code}"
+                    }
+            except requests.exceptions.ConnectionError:
+                return {
+                    "success": False,
+                    "error": f"无法连接LM Studio ({base_url})，请确认LM Studio已启动并开启Server"
+                }
+            except Exception as e:
+                logger.error(f"LM Studio连接测试失败: {e}")
+                return {
+                    "success": False,
+                    "error": f"LM Studio连接测试失败: {str(e)}"
+                }
         
         if not api_key:
             return {
@@ -283,11 +398,29 @@ def test_api_key(data: Dict[str, Any]):
                 "error": "API密钥长度不足"
             }
         
-        # 假设API密钥有效（实际应该调用服务测试）
-        return {
-            "success": True,
-            "message": "API密钥测试通过"
-        }
+        # 实际调用API测试Key有效性
+        try:
+            from backend.core.llm_manager import get_llm_manager
+            from backend.core.llm_providers import ProviderType
+            llm_manager = get_llm_manager()
+            provider_type = ProviderType(provider)
+            result = llm_manager.test_provider_connection(provider_type, api_key, model_name)
+            if result:
+                return {
+                    "success": True,
+                    "message": "API密钥验证通过"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "API密钥验证失败，请检查密钥是否正确或是否已过期"
+                }
+        except Exception as e:
+            logger.error(f"API密钥测试失败: {e}")
+            return {
+                "success": False,
+                "error": f"API密钥验证失败: {str(e)}"
+            }
     except Exception as e:
         logger.error(f"测试API密钥失败: {e}", exc_info=True)
         return {
@@ -332,8 +465,154 @@ def get_available_models():
             {"name": "hunyuan-pro", "display_name": "混元大模型Pro", "max_tokens": 8192, "description": "腾讯混元Pro模型"},
             {"name": "hunyuan-lite", "display_name": "混元大模型Lite", "max_tokens": 8192, "description": "腾讯混元Lite模型"},
             {"name": "hunyuan-standard", "display_name": "混元大模型标准版", "max_tokens": 8192, "description": "腾讯混元标准版模型"}
-        ]
+        ],
+        "ollama": [],
+        "lmstudio": [],
     }
+
+
+@router.get("/ollama-local-models")
+def get_ollama_local_models(base_url: str = "http://localhost:11434/v1"):
+    """
+    获取本地Ollama已下载的模型列表（动态调用Ollama API）
+    """
+    try:
+        import requests
+        ollama_api_base = base_url.replace("/v1", "").rstrip("/")
+        resp = requests.get(f"{ollama_api_base}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            return {"models": [], "error": f"Ollama返回异常: {resp.status_code}"}
+
+        data = resp.json()
+        models = data.get("models", [])
+        result = []
+        for m in models:
+            name = m["name"]
+            size_gb = round(m["size"] / (1024**3), 1) if m.get("size") else 0
+            result.append({
+                "name": name,
+                "display_name": f"{name} ({size_gb}GB)",
+                "max_tokens": 32768,
+                "description": f"本地已安装 · {size_gb}GB"
+            })
+        return {"models": result}
+
+    except requests.exceptions.ConnectionError:
+        return {"models": [], "error": f"无法连接Ollama服务 ({base_url})，请确认Ollama已启动"}
+    except Exception as e:
+        logger.error(f"获取Ollama本地模型失败: {e}")
+        return {"models": [], "error": str(e)}
+
+
+@router.post("/refresh-ollama-models")
+def refresh_ollama_models(data: Dict[str, Any]):
+    """
+    刷新Ollama本地模型列表，并将结果缓存到设置中
+    """
+    try:
+        base_url = data.get("base_url", "http://localhost:11434/v1")
+        secure_manager = _get_secure_manager()
+
+        import requests
+        ollama_api_base = base_url.replace("/v1", "").rstrip("/")
+        resp = requests.get(f"{ollama_api_base}/api/tags", timeout=5)
+
+        if resp.status_code != 200:
+            return {"models": [], "error": f"Ollama返回异常: {resp.status_code}"}
+
+        data = resp.json()
+        models = data.get("models", [])
+        result = []
+        for m in models:
+            name = m["name"]
+            size_gb = round(m["size"] / (1024**3), 1) if m.get("size") else 0
+            result.append({
+                "name": name,
+                "display_name": f"{name} ({size_gb}GB)",
+                "max_tokens": 32768,
+                "description": f"本地已安装 · {size_gb}GB"
+            })
+
+        # 缓存到设置中
+        secure_manager.update({"ollama_cached_models": json.dumps(result)})
+
+        return {"models": result, "cached": True}
+
+    except requests.exceptions.ConnectionError:
+        return {"models": [], "error": f"无法连接Ollama服务 ({base_url})，请确认Ollama已启动"}
+    except Exception as e:
+        logger.error(f"刷新Ollama模型失败: {e}")
+        return {"models": [], "error": str(e)}
+
+
+def get_lmstudio_local_models(base_url: str = "http://localhost:1234/v1"):
+    """
+    获取本地LM Studio已加载的模型列表（调用LM Studio API）
+    """
+    try:
+        import requests
+        resp = requests.get(f"{base_url}/models", timeout=5)
+        if resp.status_code != 200:
+            return {"models": [], "error": f"LM Studio返回异常: {resp.status_code}"}
+
+        data = resp.json()
+        models = data.get("data", [])
+        result = []
+        for m in models:
+            name = m["id"]
+            result.append({
+                "name": name,
+                "display_name": name,
+                "max_tokens": 32768,
+                "description": "本地已加载"
+            })
+        return {"models": result}
+
+    except requests.exceptions.ConnectionError:
+        return {"models": [], "error": f"无法连接LM Studio ({base_url})，请确认LM Studio已启动并开启Server"}
+    except Exception as e:
+        logger.error(f"获取LM Studio本地模型失败: {e}")
+        return {"models": [], "error": str(e)}
+
+
+@router.post("/refresh-lmstudio-models")
+def refresh_lmstudio_models(data: Dict[str, Any]):
+    """
+    刷新LM Studio本地模型列表，并将结果缓存到设置中
+    """
+    try:
+        base_url = data.get("base_url", "http://localhost:1234/v1")
+        base_url = base_url.rstrip('/') if base_url else "http://localhost:1234/v1"
+        secure_manager = _get_secure_manager()
+
+        import requests
+        resp = requests.get(f"{base_url}/models", timeout=10)
+
+        if resp.status_code != 200:
+            return {"models": [], "error": f"LM Studio返回异常: {resp.status_code}"}
+
+        data = resp.json()
+        models = data.get("data", [])
+        result = []
+        for m in models:
+            name = m["id"]
+            result.append({
+                "name": name,
+                "display_name": name,
+                "max_tokens": 32768,
+                "description": "本地已加载"
+            })
+
+        # 缓存到设置中
+        secure_manager.update({"lmstudio_cached_models": json.dumps(result)})
+
+        return {"models": result, "cached": True}
+
+    except requests.exceptions.ConnectionError:
+        return {"models": [], "error": f"无法连接LM Studio ({base_url})，请确认LM Studio已启动并开启Server"}
+    except Exception as e:
+        logger.error(f"刷新LM Studio模型失败: {e}")
+        return {"models": [], "error": str(e)}
 
 
 @router.get("/current-provider")
@@ -355,7 +634,9 @@ def get_current_provider():
             'gemini': 'api_gemini_api_key',
             'siliconflow': 'api_siliconflow_api_key',
             'zhipu': 'api_zhipu_api_key',
-            'tencent': 'api_tencent_api_key'
+            'tencent': 'api_tencent_api_key',
+            'ollama': 'api_ollama_api_key',
+            'lmstudio': 'api_lmstudio_api_key',
         }
         
         key_name = provider_key_map.get(llm_provider, 'api_dashscope_api_key')
@@ -364,13 +645,19 @@ def get_current_provider():
         if llm_provider == 'dashscope' and not has_key:
             has_key = bool(settings.api_dashscope_api_key)
         
+        # Ollama/LM Studio是本地服务，即使没有API Key也视为可用
+        if llm_provider in ('ollama', 'lmstudio'):
+            has_key = True
+        
         provider_names = {
             "dashscope": "阿里通义千问",
             "zhipu": "智谱AI",
             "openai": "OpenAI",
             "gemini": "Google Gemini",
             "siliconflow": "硅基流动",
-            "tencent": "腾讯混元"
+            "tencent": "腾讯混元",
+            "ollama": "本地Ollama",
+            "lmstudio": "本地LM Studio"
         }
         
         return {

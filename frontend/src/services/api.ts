@@ -132,13 +132,29 @@ export const settingsApi = {
   },
 
   // 测试API密钥
-  testApiKey: (provider: string, apiKey: string, modelName: string, secretKey?: string): Promise<{ success: boolean; error?: string }> => {
+  testApiKey: (provider: string, apiKey: string, modelName: string, secretKey?: string, baseUrl?: string): Promise<{ success: boolean; error?: string }> => {
     return api.post('/settings/test-api-key', {
       provider,
       api_key: apiKey,
       model_name: modelName,
-      secret_key: secretKey
+      secret_key: secretKey,
+      base_url: baseUrl
     })
+  },
+
+  // 获取Ollama本地已安装的模型
+  getOllamaLocalModels: (baseUrl: string = 'http://localhost:11434/v1'): Promise<{ models: Array<{ name: string; display_name: string; max_tokens: number; description: string }>; error?: string }> => {
+    return api.get('/settings/ollama-local-models', { params: { base_url: baseUrl } })
+  },
+
+  // 刷新Ollama本地模型并缓存
+  refreshOllamaModels: (baseUrl: string = 'http://localhost:11434/v1'): Promise<{ models: Array<{ name: string; display_name: string; max_tokens: number; description: string }>; cached: boolean; error?: string }> => {
+    return api.post('/settings/refresh-ollama-models', { base_url: baseUrl })
+  },
+
+  // 刷新LM Studio本地模型并缓存
+  refreshLmStudioModels: (baseUrl: string = 'http://localhost:1234/v1'): Promise<{ models: Array<{ name: string; display_name: string; max_tokens: number; description: string }>; cached: boolean; error?: string }> => {
+    return api.post('/settings/refresh-lmstudio-models', { base_url: baseUrl })
   },
 
   // 获取所有可用模型
@@ -211,6 +227,11 @@ export const projectApi = {
   // 删除项目
   deleteProject: async (id: string): Promise<void> => {
     await api.delete(`/projects/${id}`)
+  },
+
+  // 批量删除项目
+  batchDeleteProjects: async (ids: string[]): Promise<{ success_count: number; fail_count: number; fail_details: Array<{id: string; reason: string}> }> => {
+    return api.post('/projects/batch-delete', { project_ids: ids })
   },
 
   // 开始处理项目

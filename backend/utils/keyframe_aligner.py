@@ -118,8 +118,7 @@ class KeyframeAligner:
         if not self._initialized:
             self._initialize()
     
-    @staticmethod
-    def _find_ffprobe_path() -> str:
+    def _find_ffprobe_path(self) -> str:
         """查找 ffprobe 可执行文件路径"""
         import shutil
         import os
@@ -227,10 +226,10 @@ class KeyframeAligner:
                 self._save_to_cache(cache_file)
 
         except subprocess.TimeoutExpired:
-            logger.error("关键帧分析超时")
+            logger.warning("关键帧分析超时")
             self.keyframes = []
         except Exception as e:
-            logger.error(f"关键帧分析失败: {e}")
+            logger.warning(f"关键帧分析失败(ffprobe可能未安装): {e}")
             self.keyframes = []
         
         # 即使关键帧分析失败，也要获取视频时长

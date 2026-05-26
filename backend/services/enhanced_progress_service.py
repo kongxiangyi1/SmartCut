@@ -17,6 +17,27 @@ class ProgressCache:
         self.cache: Dict[str, Dict[str, Any]] = {}
         self.lock = Lock()
     
+    def __contains__(self, project_id: str) -> bool:
+        """支持 `in` 操作符检查项目是否存在"""
+        with self.lock:
+            return project_id in self.cache
+    
+    def __getitem__(self, project_id: str) -> Optional[Dict[str, Any]]:
+        """支持字典式访问：cache[project_id]"""
+        with self.lock:
+            return self.cache.get(project_id)
+    
+    def __setitem__(self, project_id: str, progress: Dict[str, Any]):
+        """支持字典式赋值：cache[project_id] = progress"""
+        with self.lock:
+            self.cache[project_id] = progress
+    
+    def __delitem__(self, project_id: str):
+        """支持字典式删除：del cache[project_id]"""
+        with self.lock:
+            if project_id in self.cache:
+                del self.cache[project_id]
+    
     def get(self, project_id: str) -> Optional[Dict[str, Any]]:
         """获取项目进度"""
         with self.lock:

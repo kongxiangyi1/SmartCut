@@ -1,51 +1,46 @@
-import requests
+"""检查项目状态 - 简化版本"""
 import sqlite3
+from pathlib import Path
 
-BASE_URL = "http://localhost:8000"
+# 找到数据库文件
+db_path = Path("data") / "autoclip.db"
+if not db_path.exists():
+    db_path = Path(".") / "data" / "autoclip.db"
 
-print("=" * 70)
-print("📊 项目状态检查")
-print("=" * 70)
+print(f"数据库路径: {db_path}")
+print(f"数据库存在: {db_path.exists()}")
 
-conn = sqlite3.connect(r'e:\ClipProject\autoclip-main1\autoclip-main\data\autoclip.db')
-cursor = conn.cursor()
-
-cursor.execute("SELECT id, name, status FROM projects ORDER BY updated_at DESC LIMIT 5")
-projects = cursor.fetchall()
-print(f"\n数据库中的项目:")
-for p in projects:
-    print(f"  ID: {p[0]}")
-    print(f"  名称: {p[1]}")
-    print(f"  状态: {p[2]}")
-    print()
-
-conn.close()
-
-print("\n" + "-" * 70)
-print("通过API检查项目状态...")
-print("-" * 70)
-
-for p in projects:
-    project_id = p[0]
-    try:
-        resp = requests.get(f"{BASE_URL}/api/v1/projects/{project_id}", timeout=5)
-        if resp.status_code == 200:
-            project = resp.json()
-            print(f"\n项目: {project.get('name')}")
-            print(f"  API状态: {project.get('status')}")
-            print(f"  进度: {project.get('progress', 0)}%")
-
-            resp_tasks = requests.get(f"{BASE_URL}/api/v1/tasks?project_id={project_id}", timeout=5)
-            if resp_tasks.status_code == 200:
-                tasks = resp_tasks.json()
-                for task in tasks:
-                    print(f"  任务: {task.get('name')}")
-                    print(f"  任务状态: {task.get('status')}")
-                    print(f"  任务进度: {task.get('progress', 0)}%")
-                    print(f"  当前步骤: {task.get('current_step', 'N/A')}")
-        else:
-            print(f"\n项目 {project_id}: API返回 {resp.status_code}")
-    except Exception as e:
-        print(f"\n项目 {project_id}: 连接失败 - {e}")
-
-print("\n" + "=" * 70)
+if db_path.exists():
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    print("\n=== 表结构 ===")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = cursor.fetchall()
+    for table in tables:
+        table_name = table[0]
+        print(f"\n表: {table_name}")
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = cursor.fetchall()
+        for col in columns:
+            print(f"  {col[1]} ({col[2]})")
+    
+    print("\n=== 项目列表 ===")
+    cursor.execute("SELECT * FROM projects")
+    columns = [desc[0] for desc in cursor.description]
+    projects = cursor.fetchall()
+    for p in projects:
+        print(f"记录: {dict(zip(columns, p))}")
+        print()
+    
+    print("\n=== 任务列表 ===")
+    cursor.execute("SELECT * FROM tasks")
+    columns = [desc[0] for desc in cursor.description]
+    tasks = cursor.fetchall()
+    for t in tasks:
+        print(f"记录: {dict(zip(columns, t))}")
+        print()
+    
+    conn.close()
+else:
+    print("数据库文件不存在")

@@ -1,45 +1,27 @@
+import requests
+import time
 
-import sqlite3
-import os
+project_id = "b01e17bf-ba3e-4137-a648-a1d89566a6c7"
 
-# 设置环境变量
-os.environ['USE_SIMPLE_TASK_RUNNER'] = 'true'
+print(f"=== 启动项目 {project_id} 处理流程 ===")
 
-# 连接数据库获取项目信息
-conn = sqlite3.connect(r'e:\ClipProject\autoclip-main1\autoclip-main\data\autoclip.db')
-cursor = conn.cursor()
+# 启动处理
+r = requests.post(f'http://127.0.0.1:8090/api/v1/projects/{project_id}/process')
+result = r.json()
 
-cursor.execute("SELECT id, video_path FROM projects WHERE name LIKE '%clip_001_product%'")
-project = cursor.fetchone()
+print(f"启动结果: {result.get('message')}")
+print(f"任务ID: {result.get('task_id')}")
 
-if project:
-    project_id = project[0]
-    video_path = project[1]
-    print(f'项目ID: {project_id}')
-    print(f'视频路径: {video_path}')
-    
-    # 重置项目状态为 pending
-    cursor.execute("UPDATE projects SET status = 'pending' WHERE id = ?", (project_id,))
-    conn.commit()
-    print('已重置项目状态为 pending')
-    
-else:
-    print('未找到项目')
+# 等待5秒后检查状态
+print("\n=== 等待5秒后检查处理状态 ===")
+time.sleep(5)
 
-conn.close()
+# 检查处理状态
+r = requests.get(f'http://127.0.0.1:8090/api/v1/projects/{project_id}/status')
+status_data = r.json()
 
-# 调用简化任务提交器启动处理
-from backend.utils.simple_task_submitter import get_task_submitter
-
-submitter = get_task_submitter()
-result = submitter.submit_video_pipeline(
-    project_id=project_id,
-    input_video_path=video_path,
-    input_srt_path=None
-)
-
-print(f'\n任务提交结果:')
-print(f'成功: {result.get("success")}')
-print(f'任务ID: {result.get("task_id")}')
-print(f'状态: {result.get("status")}')
-print(f'消息: {result.get("message")}')
+print(f"当前状态: {status_data.get('status')}")
+print(f"当前步骤: {status_data.get('current_step')}/{status_data.get('total_steps')}")
+print(f"步骤名称: {status_data.get('step_name')}")
+print(f"进度: {status_data.get('progress')}%")
+print(f"错误信息: {status_data.get('error_message')}")

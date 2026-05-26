@@ -762,6 +762,19 @@ class SpeechRecognizer:
                 secs = seconds % 60
                 return f"{hours:02}:{minutes:02}:{secs:06.3f}".replace('.', ',')
 
+            funasr_vad_segments = []
+            for seg in result:
+                if isinstance(seg, dict):
+                    ts = seg.get('timestamp', seg.get('time_stamp', []))
+                    if isinstance(ts, list) and len(ts) > 0 and isinstance(ts[0], list):
+                        funasr_vad_segments.append({'start': ts[0][0] / 1000.0, 'end': ts[-1][1] / 1000.0})
+
+            import json as _json
+            vad_path = output_path.with_suffix('.vad.json')
+            with open(vad_path, 'w', encoding='utf-8') as vf:
+                _json.dump(funasr_vad_segments, vf)
+            logger.info(f"FunASR VAD 数据已保存: {vad_path} ({len(funasr_vad_segments)} 段语音)")
+
             def split_text_by_punctuation(text):
                 sentences = []
                 current = ""

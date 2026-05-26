@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Layout, Card, Form, Input, Button, Typography, Space, Alert, Divider, Row, Col, Tabs, message, Select, Tag, Table } from 'antd'
-import { KeyOutlined, SaveOutlined, ApiOutlined, SettingOutlined, InfoCircleOutlined, UserOutlined, RobotOutlined, AudioOutlined, CloudOutlined } from '@ant-design/icons'
+import { KeyOutlined, SaveOutlined, ApiOutlined, SettingOutlined, InfoCircleOutlined, UserOutlined, RobotOutlined, AudioOutlined, CloudOutlined, ReloadOutlined } from '@ant-design/icons'
 import { settingsApi } from '../services/api'
 import BilibiliManager from '../components/BilibiliManager'
 import './SettingsPage.css'
@@ -43,6 +43,10 @@ const SettingsPage: React.FC = () => {
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({})
   const [selectedSpeechMethod, setSelectedSpeechMethod] = useState<string>('funasr')
   const [error, setError] = useState<string | null>(null)
+  const [ollamaModels, setOllamaModels] = useState<Array<{ name: string; display_name: string; max_tokens: number; description: string }>>([])
+  const [isOllamaLoading, setIsOllamaLoading] = useState(false)
+  const [lmstudioModels, setLmStudioModels] = useState<Array<{ name: string; display_name: string; max_tokens: number; description: string }>>([])
+  const [isLmStudioLoading, setIsLmStudioLoading] = useState(false)
 
   // ✅ 修复：错误提示自动清除
   useEffect(() => {
@@ -61,6 +65,9 @@ const SettingsPage: React.FC = () => {
     placeholder: string;
     secretKeyField?: string;
     secretKeyPlaceholder?: string;
+    showBaseUrl?: boolean;
+    baseUrlField?: string;
+    baseUrlPlaceholder?: string;
   }> = {
     dashscope: {
       name: '阿里通义千问',
@@ -121,6 +128,32 @@ const SettingsPage: React.FC = () => {
       placeholder: '请输入腾讯混元 API Key',
       secretKeyField: undefined,
       secretKeyPlaceholder: ''
+    },
+    ollama: {
+      name: '本地Ollama',
+      icon: <RobotOutlined />,
+      color: '#fa8c16',
+      description: '本地Ollama大模型，完全免费离线',
+      apiKeyField: 'ollama_api_key',
+      placeholder: '可选，Ollama默认无需API Key',
+      secretKeyField: undefined,
+      secretKeyPlaceholder: '',
+      showBaseUrl: true,
+      baseUrlField: 'ollama_base_url',
+      baseUrlPlaceholder: 'http://localhost:11434/v1'
+    },
+    lmstudio: {
+      name: '本地LM Studio',
+      icon: <RobotOutlined />,
+      color: '#eb2f96',
+      description: '本地LM Studio大模型，GPU加速',
+      apiKeyField: 'lmstudio_api_key',
+      placeholder: '可选，LM Studio默认无需API Key',
+      secretKeyField: undefined,
+      secretKeyPlaceholder: '',
+      showBaseUrl: true,
+      baseUrlField: 'lmstudio_base_url',
+      baseUrlPlaceholder: 'http://localhost:1234/v1'
     }
   }
 
@@ -155,7 +188,9 @@ const SettingsPage: React.FC = () => {
       { name: 'hunyuan-pro', display_name: '混元大模型Pro' },
       { name: 'hunyuan-lite', display_name: '混元大模型Lite' },
       { name: 'hunyuan-standard', display_name: '混元大模型标准版' }
-    ]
+    ],
+    ollama: [],
+    lmstudio: []
   }
 
   const whisperModels = [
@@ -212,6 +247,66 @@ const SettingsPage: React.FC = () => {
           model_name: modelName
         })
 
+        // 加载Ollama缓存的模型列表
+        if (selectedProviderValue === 'ollama') {
+          if (settings.ollama_cached_models) {
+            try {
+              const cached = typeof settings.ollama_cached_models === 'string'
+                ? JSON.parse(settings.ollama_cached_models)
+                : settings.ollama_cached_models
+              if (Array.isArray(cached) && cached.length > 0) {
+                setOllamaModels(cached)
+                // 仅当当前model_name在缓存列表中时才保留，否则清空
+                if (modelName && cached.some((m: any) => m.name === modelName)) {
+                  // model_name 在缓存中，保持原选择
+                } else {
+                  form.setFieldsValue({ model_name: undefined })
+                }
+              } else {
+                // 缓存为空，清空模型选择
+                setOllamaModels([])
+                form.setFieldsValue({ model_name: undefined })
+              }
+            } catch (e) {
+              setOllamaModels([])
+              form.setFieldsValue({ model_name: undefined })
+            }
+          } else {
+            // 没有缓存，清空模型选择
+            setOllamaModels([])
+            form.setFieldsValue({ model_name: undefined })
+          }
+        }
+
+        // 加载LM Studio缓存的模型列表
+        if (selectedProviderValue === 'lmstudio') {
+          if (settings.lmstudio_cached_models) {
+            try {
+              const cached = typeof settings.lmstudio_cached_models === 'string'
+                ? JSON.parse(settings.lmstudio_cached_models)
+                : settings.lmstudio_cached_models
+              if (Array.isArray(cached) && cached.length > 0) {
+                setLmStudioModels(cached)
+                if (modelName && cached.some((m: any) => m.name === modelName)) {
+                  // model_name 在缓存中，保持原选择
+                } else {
+                  form.setFieldsValue({ model_name: undefined })
+                }
+              } else {
+                setLmStudioModels([])
+                form.setFieldsValue({ model_name: undefined })
+              }
+            } catch (e) {
+              setLmStudioModels([])
+              form.setFieldsValue({ model_name: undefined })
+            }
+          } else {
+            // 没有缓存，清空模型选择
+            setLmStudioModels([])
+            form.setFieldsValue({ model_name: undefined })
+          }
+        }
+
         // 设置语音识别表单
         speechForm.setFieldsValue({
           speech_recognition_method: settings.speech_recognition_method || 'funasr',
@@ -241,6 +336,9 @@ const SettingsPage: React.FC = () => {
     try {
       setLoadingStates(prev => ({ ...prev, settings: true }))
       await settingsApi.updateSettings(values)
+      // 保存后刷新当前提供商信息，确保提示框显示最新状态
+      const provider = await settingsApi.getCurrentProvider()
+      setCurrentProvider(provider)
       message.success('配置保存成功！')
     } catch (error: any) {
       message.error('保存失败: ' + (error.message || '未知错误'))
@@ -266,15 +364,18 @@ const SettingsPage: React.FC = () => {
     const apiKey = form.getFieldValue(provider.apiKeyField)
     const secretKey = provider.secretKeyField ? form.getFieldValue(provider.secretKeyField) : null
     const modelName = form.getFieldValue('model_name')
+    const baseUrl = provider.showBaseUrl ? form.getFieldValue(provider.baseUrlField) : null
 
-    if (!apiKey) {
-      message.error('请先输入' + (provider.secretKeyField ? 'Secret ID' : 'API密钥'))
-      return
-    }
+    if (selectedProvider !== 'ollama' && selectedProvider !== 'lmstudio') {
+      if (!apiKey) {
+        message.error('请先输入' + (provider.secretKeyField ? 'Secret ID' : 'API密钥'))
+        return
+      }
 
-    if (provider.secretKeyField && !secretKey) {
-      message.error('请先输入 Secret Key')
-      return
+      if (provider.secretKeyField && !secretKey) {
+        message.error('请先输入 Secret Key')
+        return
+      }
     }
 
     if (!modelName) {
@@ -284,11 +385,11 @@ const SettingsPage: React.FC = () => {
 
     try {
       setLoadingStates(prev => ({ ...prev, test: true }))
-      const result = await settingsApi.testApiKey(selectedProvider as string, apiKey, modelName, secretKey)
+      const result = await settingsApi.testApiKey(selectedProvider as string, apiKey, modelName, secretKey, baseUrl)
       if (result.success) {
-        message.success('API密钥测试成功！')
+        message.success('连接测试成功！')
       } else {
-        message.error('API密钥测试失败: ' + (result.error || '未知错误'))
+        message.error('连接测试失败: ' + (result.error || '未知错误'))
       }
     } catch (error: any) {
       message.error('测试失败: ' + (error.message || '未知错误'))
@@ -300,12 +401,73 @@ const SettingsPage: React.FC = () => {
   // ✅ 修复：统一状态更新逻辑
   const handleProviderChange = useCallback((provider: string) => {
     setSelectedProvider(provider)
+    setOllamaModels([])
+    setLmStudioModels([])
     form.setFieldsValue({ llm_provider: provider })
+  }, [])
+
+  // 手动刷新Ollama模型列表并缓存
+  const handleRefreshOllamaModels = useCallback(async () => {
+    const baseUrl = form.getFieldValue('ollama_base_url') || 'http://localhost:11434/v1'
+    setIsOllamaLoading(true)
+    try {
+      const result = await settingsApi.refreshOllamaModels(baseUrl)
+      if (result.models && result.models.length > 0) {
+        setOllamaModels(result.models)
+        // 当前已选模型在列表中则保留，否则清空让用户手动选
+        const currentModel = form.getFieldValue('model_name')
+        if (!currentModel || !result.models.some((m: any) => m.name === currentModel)) {
+          form.setFieldsValue({ model_name: undefined })
+        }
+        message.success(`检测到 ${result.models.length} 个本地模型`)
+      } else {
+        setOllamaModels([])
+        form.setFieldsValue({ model_name: undefined })
+        message.warning(result.error || '未检测到已安装的模型')
+      }
+    } catch (err: any) {
+      setOllamaModels([])
+      form.setFieldsValue({ model_name: undefined })
+      message.error('检测失败: ' + (err.message || '未知错误'))
+    } finally {
+      setIsOllamaLoading(false)
+    }
+  }, [])
+
+  // 手动刷新LM Studio模型列表并缓存
+  const handleRefreshLmStudioModels = useCallback(async () => {
+    const baseUrl = form.getFieldValue('lmstudio_base_url') || 'http://localhost:1234/v1'
+    setIsLmStudioLoading(true)
+    try {
+      const result = await settingsApi.refreshLmStudioModels(baseUrl)
+      if (result.models && result.models.length > 0) {
+        setLmStudioModels(result.models)
+        const currentModel = form.getFieldValue('model_name')
+        if (!currentModel || !result.models.some((m: any) => m.name === currentModel)) {
+          form.setFieldsValue({ model_name: undefined })
+        }
+        message.success(`检测到 ${result.models.length} 个本地模型`)
+      } else {
+        setLmStudioModels([])
+        form.setFieldsValue({ model_name: undefined })
+        message.warning(result.error || '未检测到已安装的模型')
+      }
+    } catch (err: any) {
+      setLmStudioModels([])
+      form.setFieldsValue({ model_name: undefined })
+      message.error('检测失败: ' + (err.message || '未知错误'))
+    } finally {
+      setIsLmStudioLoading(false)
+    }
   }, [])
 
   // ✅ 修复：添加正确的依赖数组
   useEffect(() => {
     if (selectedProvider && Object.keys(availableModels).length > 0) {
+      // Ollama/LM Studio模型由handleProviderChange动态处理，不在此处干预
+      if (selectedProvider === 'ollama' || selectedProvider === 'lmstudio') {
+        return
+      }
       const providerModels = availableModels[selectedProvider] || defaultModels[selectedProvider]
       if (providerModels && providerModels.length > 0) {
         // 优先使用用户之前保存的选择，否则使用第一个模型
@@ -430,10 +592,14 @@ const SettingsPage: React.FC = () => {
                     }`}
                     name={providerConfig[selectedProvider as keyof typeof providerConfig].apiKeyField}
                     className="form-item"
-                    rules={[
-                      { required: true, message: '请输入密钥' },
-                      { min: 10, message: '密钥长度不能少于10位' }
-                    ]}
+                    rules={
+                      selectedProvider === 'ollama' || selectedProvider === 'lmstudio'
+                        ? []  // Ollama/LM Studio不需要API Key
+                        : [
+                            { required: true, message: '请输入密钥' },
+                            { min: 10, message: '密钥长度不能少于10位' }
+                          ]
+                    }
                   >
                     <Input.Password
                       placeholder={providerConfig[selectedProvider as keyof typeof providerConfig].placeholder}
@@ -441,6 +607,21 @@ const SettingsPage: React.FC = () => {
                       className="settings-input"
                     />
                   </Form.Item>
+
+                  {providerConfig[selectedProvider as keyof typeof providerConfig].showBaseUrl && (
+                    <Form.Item
+                      label={selectedProvider === 'lmstudio' ? 'LM Studio 服务地址' : 'Ollama 服务地址'}
+                      name={providerConfig[selectedProvider as keyof typeof providerConfig].baseUrlField}
+                      className="form-item"
+                      rules={[{ required: true, message: '请输入Ollama服务地址' }]}
+                    >
+                      <Input
+                        placeholder={providerConfig[selectedProvider as keyof typeof providerConfig].baseUrlPlaceholder}
+                        prefix={<ApiOutlined />}
+                        className="settings-input"
+                      />
+                    </Form.Item>
+                  )}
 
                   {providerConfig[selectedProvider as keyof typeof providerConfig].secretKeyField && (
                     <Form.Item
@@ -470,24 +651,133 @@ const SettingsPage: React.FC = () => {
                 >
                   <Select
                     className="settings-input"
-                    placeholder="请选择模型"
+                    placeholder={selectedProvider === 'ollama' ? (isOllamaLoading ? '正在获取本地模型...' : '未检测到模型，请先安装') : selectedProvider === 'lmstudio' ? (isLmStudioLoading ? '正在获取本地模型...' : '未检测到模型，请先在LM Studio中加载') : '请选择模型'}
                     showSearch
                     filterOption={(input, option) => {
                       const label = option?.label as string
                       return label?.toLowerCase().includes(input.toLowerCase())
                     }}
                     onChange={handleModelChange}
+                    loading={(selectedProvider === 'ollama' && isOllamaLoading) || (selectedProvider === 'lmstudio' && isLmStudioLoading)}
+                    disabled={(selectedProvider === 'ollama' && ollamaModels.length === 0 && !isOllamaLoading) || (selectedProvider === 'lmstudio' && lmstudioModels.length === 0 && !isLmStudioLoading)}
                   >
-                    {selectedProvider && (availableModels[selectedProvider] || defaultModels[selectedProvider])?.map((model: any) => (
-                      <Select.Option key={model.name} value={model.name}>
-                        <Space>
-                          <span>{model.display_name}</span>
-                          {model.max_tokens && <Tag color="blue">最大{model.max_tokens} tokens</Tag>}
-                        </Space>
-                      </Select.Option>
-                    ))}
+                    {selectedProvider === 'ollama'
+                      ? ollamaModels.map((model: any) => (
+                          <Select.Option key={model.name} value={model.name}>
+                            <Space>
+                              <span>{model.display_name}</span>
+                              <Tag color="green">本地已安装</Tag>
+                            </Space>
+                          </Select.Option>
+                        ))
+                      : selectedProvider === 'lmstudio'
+                        ? lmstudioModels.map((model: any) => (
+                            <Select.Option key={model.name} value={model.name}>
+                              <Space>
+                                <span>{model.display_name}</span>
+                                <Tag color="green">本地已加载</Tag>
+                              </Space>
+                            </Select.Option>
+                          ))
+                        : (availableModels[selectedProvider] || defaultModels[selectedProvider])?.map((model: any) => (
+                            <Select.Option key={model.name} value={model.name}>
+                              <Space>
+                                <span>{model.display_name}</span>
+                                {model.max_tokens && <Tag color="blue">最大{model.max_tokens} tokens</Tag>}
+                              </Space>
+                            </Select.Option>
+                          ))
+                    }
                   </Select>
                 </Form.Item>
+
+                {selectedProvider === 'ollama' && (
+                  <>
+                    {ollamaModels.length > 0 ? (
+                      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <Tag color="green" style={{ fontSize: 13, padding: '2px 10px' }}>
+                          已缓存 {ollamaModels.length} 个本地模型
+                        </Tag>
+                        <Button size="small" icon={<ReloadOutlined />} onClick={handleRefreshOllamaModels} loading={isOllamaLoading}>
+                          重新检测
+                        </Button>
+                      </div>
+                    ) : (
+                      !isOllamaLoading && (
+                        <Alert
+                          className="ollama-alert"
+                          message="未检测到本地模型"
+                          description={
+                            <div>
+                              <Text>请先在终端中安装模型：</Text>
+                              <br />
+                              <Text code>ollama pull qwen2.5</Text>
+                              <br /><br />
+                              <Text type="secondary">常用中文模型推荐：</Text>
+                              <br />
+                              <Text code>ollama pull qwen2.5</Text> <Text type="secondary">（4GB，推荐）</Text>
+                              <br />
+                              <Text code>ollama pull qwen2.5:14b</Text> <Text type="secondary">（9GB，更强）</Text>
+                              <br />
+                              <Text code>ollama pull glm4:9b</Text> <Text type="secondary">（5GB，智谱）</Text>
+                              <br /><br />
+                              <Button icon={<ReloadOutlined />} size="small" onClick={handleRefreshOllamaModels} loading={isOllamaLoading}>
+                                检测本地模型
+                              </Button>
+                            </div>
+                          }
+                          type="warning"
+                          showIcon
+                          style={{ marginBottom: 24 }}
+                        />
+                      )
+                    )}
+                  </>
+                )}
+
+                {selectedProvider === 'lmstudio' && (
+                  <>
+                    {lmstudioModels.length > 0 ? (
+                      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <Tag color="green" style={{ fontSize: 13, padding: '2px 10px' }}>
+                          已缓存 {lmstudioModels.length} 个本地模型
+                        </Tag>
+                        <Button size="small" icon={<ReloadOutlined />} onClick={handleRefreshLmStudioModels} loading={isLmStudioLoading}>
+                          重新检测
+                        </Button>
+                      </div>
+                    ) : (
+                      !isLmStudioLoading && (
+                        <Alert
+                          className="ollama-alert"
+                          message="未检测到LM Studio中的模型"
+                          description={
+                            <div>
+                              <Text>请先在LM Studio中加载模型，然后点击下方按钮检测：</Text>
+                              <br /><br />
+                              <Text type="secondary">LM Studio 使用说明：</Text>
+                              <br />
+                              <Text>1. 打开LM Studio应用</Text>
+                              <br />
+                              <Text>2. 在"Local Server"标签页加载模型</Text>
+                              <br />
+                              <Text>3. 确保服务器已启动（默认端口1234）</Text>
+                              <br />
+                              <Text>4. 点击下方检测按钮</Text>
+                              <br /><br />
+                              <Button icon={<ReloadOutlined />} size="small" onClick={handleRefreshLmStudioModels} loading={isLmStudioLoading}>
+                                检测本地模型
+                              </Button>
+                            </div>
+                          }
+                          type="warning"
+                          showIcon
+                          style={{ marginBottom: 24 }}
+                        />
+                      )
+                    )}
+                  </>
+                )}
 
                 <Form.Item className="form-item">
                   <Space>
@@ -584,6 +874,7 @@ const SettingsPage: React.FC = () => {
                     <br />• <Text strong>OpenAI</Text>：访问 platform.openai.com 获取API密钥
                     <br />• <Text strong>Google Gemini</Text>：访问 ai.google.dev 获取API密钥
                     <br />• <Text strong>硅基流动</Text>：访问 docs.siliconflow.cn 获取API密钥
+                    <br />• <Text strong>本地Ollama</Text>：安装Ollama后选择，无需API Key，完全免费离线
                   </Paragraph>
                 </div>
 

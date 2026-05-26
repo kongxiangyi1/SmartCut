@@ -5,8 +5,12 @@ import {
   Select, 
   Spin, 
   Empty,
-  message 
+  message,
+  Checkbox,
+  Modal,
+  Button
 } from 'antd'
+import { DeleteOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import ProjectCard from '../components/ProjectCard'
 import FileUpload from '../components/FileUpload'
@@ -15,7 +19,6 @@ import BilibiliDownload from '../components/BilibiliDownload'
 import { projectApi } from '../services/api'
 import { Project, useProjectStore } from '../store/useProjectStore'
 import { useProjectPolling } from '../hooks/useProjectPolling'
-// import { useWebSocket, WebSocketEventMessage } from '../hooks/useWebSocket'  // 已禁用WebSocket系统
 
 const { Content } = Layout
 const { Title, Text } = Typography
@@ -23,9 +26,12 @@ const { Option } = Select
 
 const HomePage: React.FC = () => {
   const navigate = useNavigate()
-  const { projects, setProjects, deleteProject, loading, setLoading } = useProjectStore()
+  const { projects, setProjects, batchDeleteProjects, loading, setLoading } = useProjectStore()
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [activeTab, setActiveTab] = useState<'upload' | 'bilibili'>('upload')
+  const [batchMode, setBatchMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
 
   // WebSocket连接已禁用，使用新的简化进度系统
   // const handleWebSocketMessage = (message: WebSocketEventMessage) => {
@@ -100,11 +106,71 @@ const HomePage: React.FC = () => {
   const handleDeleteProject = async (id: string) => {
     try {
       await projectApi.deleteProject(id)
-      deleteProject(id)
+      batchDeleteProjects([id])
       message.success('项目删除成功')
     } catch (error) {
       message.error('删除项目失败')
       console.error('Delete project error:', error)
+    }
+  }
+
+  const handleBatchDelete = () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) {
+      message.warning('请先选择要删除的项目')
+      return
+    }
+    Modal.confirm({
+      title: '批量删除确认',
+      content: `确定要删除选中的 ${ids.length} 个项目吗？此操作不可撤销。`,
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        setBatchDeleting(true)
+        try {
+          const result = await projectApi.batchDeleteProjects(ids)
+          batchDeleteProjects(ids)
+          setSelectedIds(new Set())
+          setBatchMode(false)
+          if (result.fail_count === 0) {
+            message.success(`成功删除 ${result.success_count} 个项目`)
+          } else {
+            message.warning(
+              `删除了 ${result.success_count} 个项目，` +
+              `${result.fail_count} 个失败：` +
+              result.fail_details.map(d => `${d.id.substring(0,8)}(${d.reason})`).join('、')
+            )
+          }
+        } catch (error) {
+          message.error('批量删除失败')
+          console.error('Batch delete error:', error)
+        } finally {
+          setBatchDeleting(false)
+        }
+      }
+    })
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const isAllSelected = batchMode && projects.length > 0 && selectedIds.size === projects.length
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(projects.map(p => p.id)))
     }
   }
 
@@ -317,51 +383,112 @@ const HomePage: React.FC = () => {
                 </div>
               </div>
               
-              {/* 状态筛选移到右侧 */}
+              {/* 右侧操作区 */}
               <div style={{ 
                 display: 'flex', 
-                alignItems: 'center'
+                alignItems: 'center',
+                gap: '8px'
               }}>
-                <Select
-                  placeholder="选择状态"
-                  value={statusFilter}
-                  onChange={setStatusFilter}
-                  style={{ 
-                    minWidth: '140px',
-                    height: '36px',
-                    background: 'rgba(255, 255, 255, 0.05)',
-                    border: '1px solid rgba(79, 172, 254, 0.2)',
-                    borderRadius: '8px',
-                    color: '#ffffff',
-                    fontSize: '14px'
-                  }}
-                  styles={{
-                    popup: {
-                      root: {
-                        background: 'rgba(26, 26, 46, 0.95)',
-                        border: '1px solid rgba(79, 172, 254, 0.3)',
+                {batchMode ? (
+                  <>
+                    <Checkbox
+                      checked={isAllSelected}
+                      onChange={toggleSelectAll}
+                      style={{ color: '#ffffff' }}
+                    >
+                      全选
+                    </Checkbox>
+                    <Button
+                      type="primary"
+                      danger
+                      icon={<DeleteOutlined />}
+                      loading={batchDeleting}
+                      disabled={selectedIds.size === 0}
+                      onClick={handleBatchDelete}
+                      style={{
+                        height: '36px',
                         borderRadius: '8px',
-                        backdropFilter: 'blur(20px)',
-                        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+                        fontSize: '14px',
+                        fontWeight: 600
+                      }}
+                    >
+                      删除选中({selectedIds.size})
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setBatchMode(false)
+                        setSelectedIds(new Set())
+                      }}
+                      style={{
+                        height: '36px',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        background: 'rgba(255,255,255,0.08)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        color: '#cccccc'
+                      }}
+                    >
+                      取消
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Select
+                      placeholder="选择状态"
+                      value={statusFilter}
+                      onChange={setStatusFilter}
+                      style={{ 
+                        minWidth: '140px',
+                        height: '36px',
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: '1px solid rgba(79, 172, 254, 0.2)',
+                        borderRadius: '8px',
+                        color: '#ffffff',
+                        fontSize: '14px'
+                      }}
+                      styles={{
+                        popup: {
+                          root: {
+                            background: 'rgba(26, 26, 46, 0.95)',
+                            border: '1px solid rgba(79, 172, 254, 0.3)',
+                            borderRadius: '8px',
+                            backdropFilter: 'blur(20px)',
+                            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+                          }
+                        }
+                      }}
+                      suffixIcon={
+                        <span style={{ 
+                          color: '#8c8c8c', 
+                          fontSize: '10px',
+                          transition: 'all 0.2s ease'
+                        }}>
+                          ⌄
+                        </span>
                       }
-                    }
-                  }}
-                  suffixIcon={
-                    <span style={{ 
-                      color: '#8c8c8c', 
-                      fontSize: '10px',
-                      transition: 'all 0.2s ease'
-                    }}>
-                      ⌄
-                    </span>
-                  }
-                  allowClear
-                >
-                  <Option value="all" style={{ color: '#ffffff' }}>全部状态</Option>
-                  <Option value="completed" style={{ color: '#52c41a' }}>已完成</Option>
-                  <Option value="processing" style={{ color: '#1890ff' }}>处理中</Option>
-                  <Option value="error" style={{ color: '#ff4d4f' }}>处理失败</Option>
-                </Select>
+                      allowClear
+                    >
+                      <Option value="all" style={{ color: '#ffffff' }}>全部状态</Option>
+                      <Option value="completed" style={{ color: '#52c41a' }}>已完成</Option>
+                      <Option value="processing" style={{ color: '#1890ff' }}>处理中</Option>
+                      <Option value="error" style={{ color: '#ff4d4f' }}>处理失败</Option>
+                    </Select>
+                    <Button
+                      icon={<DeleteOutlined />}
+                      onClick={() => setBatchMode(true)}
+                      style={{
+                        height: '36px',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        background: 'rgba(255,77,79,0.1)',
+                        border: '1px solid rgba(255,77,79,0.3)',
+                        color: '#ff4d4f'
+                      }}
+                    >
+                      批量删除
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -413,11 +540,46 @@ const HomePage: React.FC = () => {
                  }}>
                    {filteredProjects.map((project: Project) => (
                      <div key={project.id} style={{ position: 'relative', zIndex: 1 }}>
+                       {batchMode && (
+                         <div
+                           onClick={() => toggleSelect(project.id)}
+                           style={{
+                             position: 'absolute',
+                             top: '8px',
+                             left: '8px',
+                             zIndex: 10,
+                             cursor: 'pointer',
+                             background: selectedIds.has(project.id)
+                               ? '#ff4d4f'
+                               : 'rgba(0,0,0,0.55)',
+                             borderRadius: '50%',
+                             width: '24px',
+                             height: '24px',
+                             display: 'flex',
+                             alignItems: 'center',
+                             justifyContent: 'center',
+                             border: selectedIds.has(project.id)
+                               ? '2px solid #ff4d4f'
+                               : '2px solid rgba(255,255,255,0.6)',
+                             transition: 'all 0.2s ease'
+                           }}
+                         >
+                           {selectedIds.has(project.id) && (
+                             <span style={{ color: '#fff', fontSize: '14px', fontWeight: 700 }}>✓</span>
+                           )}
+                         </div>
+                       )}
                        <ProjectCard 
                          project={project} 
                          onDelete={handleDeleteProject}
                          onRetry={() => handleRetryProject(project.id)}
-                         onClick={() => handleProjectCardClick(project)}
+                         onClick={() => {
+                           if (batchMode) {
+                             toggleSelect(project.id)
+                           } else {
+                             handleProjectCardClick(project)
+                           }
+                         }}
                        />
                      </div>
                    ))}

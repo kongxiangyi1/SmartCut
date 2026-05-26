@@ -336,6 +336,14 @@ body {
   color: #ffffff !important;
 }
 
+.ant-modal-confirm-body .ant-modal-confirm-content {
+  color: #ffffff !important;
+}
+
+.ant-modal-confirm-title {
+  color: #ffffff !important;
+}
+
 .ant-modal-footer {
   border-top: 1px solid #2d2d2d !important;
   border-radius: 0 0 12px 12px !important;

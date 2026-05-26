@@ -120,13 +120,14 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
         video.muted = true
         video.preload = 'metadata'
         
-        // 尝试多个可能的视频文件路径
-        const possiblePaths = [
-          'input/input.mp4',
-          'input.mp4',
-          project.video_path,
-          `${project.video_path}/input.mp4`
-        ].filter(Boolean)
+        // 尝试多个可能的视频文件路径 - 优先尝试正确的路径
+          const possiblePaths = [
+            'input.mp4',  // 优先尝试直接的文件名，后端会在 raw 目录下查找
+            'input/input.mp4',
+            project.video_path ? project.video_path.split(/[\\/]/).pop() : null, // 尝试从完整路径中提取文件名
+            project.video_path,
+            `${project.video_path}/input.mp4`
+          ].filter(Boolean)
         
         let videoLoaded = false
         

@@ -3,7 +3,7 @@
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -15,7 +15,7 @@ from backend.utils.task_submission_utils import submit_video_pipeline_task
 from backend.core.websocket_manager import manager as websocket_manager
 from backend.schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse, ProjectFilter,
-    ProjectType, ProjectStatus
+    ProjectType, ProjectStatus, BatchDeleteRequest
 )
 from backend.schemas.base import PaginationParams
 
@@ -364,6 +364,16 @@ async def delete_project(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/batch-delete")
+async def batch_delete_projects(
+    request: BatchDeleteRequest,
+    project_service: ProjectService = Depends(get_project_service)
+):
+    """批量删除项目"""
+    result = project_service.batch_delete_projects(request.project_ids)
+    return result
 
 
 @router.post("/sync-all-data")
@@ -885,35 +895,53 @@ async def get_project_file(
         from pathlib import Path
         import json
         from fastapi.responses import FileResponse
-        
+
         # 构建文件路径 - 使用正确的项目目录路径
         from backend.core.path_utils import get_project_directory
         project_root = get_project_directory(project_id)
+
+        file_path = None
         
-        # filepath 已经包含完整路径，如 "input/input.mp4"
-        file_path = project_root / filepath
+        # 尝试多种可能的路径模式
+        possible_paths = [
+            # 1. 直接使用提供的路径
+            project_root / filepath,
+            # 2. 在 raw 目录下查找
+            project_root / "raw" / filepath,
+            # 3. 如果是 input/input.mp4，尝试直接在 raw 目录下查找 input.mp4
+            project_root / "raw" / Path(filepath).name if filepath.endswith(".mp4") else None,
+            # 4. 如果是 input.mp4，直接在 raw 目录下查找
+            project_root / "raw" / "input.mp4" if "input.mp4" in filepath else None,
+            # 5. 尝试不带 input/ 前缀的路径
+            project_root / "raw" / filepath.replace("input/", "") if "input/" in filepath else None
+        ]
         
-        if not file_path.exists():
-            # 尝试在 raw 目录下查找
-            raw_path = project_root / "raw" / filepath
-            if raw_path.exists():
-                file_path = raw_path
-            else:
-                logger.error(f"文件不存在: {file_path}, raw路径: {raw_path}")
-                raise HTTPException(status_code=404, detail="File not found")
+        # 过滤掉 None 值
+        possible_paths = [p for p in possible_paths if p is not None]
         
+        # 遍历所有可能的路径
+        for path in possible_paths:
+            if path.exists():
+                file_path = path
+                logger.info(f"找到文件: {path}")
+                break
+        
+        if not file_path:
+            logger.error(f"文件不存在，尝试过的路径: {possible_paths}")
+            raise HTTPException(status_code=404, detail="File not found")
+
         # 根据文件类型返回不同响应
-        if filepath.endswith('.json'):
+        if str(file_path).endswith('.json'):
             # JSON文件返回数据
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return data
         else:
             # 其他文件（如视频）返回文件流
-            media_type = "video/mp4" if filepath.endswith('.mp4') else "application/octet-stream"
+            media_type = "video/mp4" if str(file_path).endswith('.mp4') else "application/octet-stream"
             return FileResponse(
                 path=str(file_path),
-                filename=Path(filepath).name,
+                filename=Path(file_path).name,
                 media_type=media_type,
                 headers={
                     "Accept-Ranges": "bytes",
@@ -924,6 +952,8 @@ async def get_project_file(
         raise
     except Exception as e:
         logger.error(f"获取项目文件失败: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=str(e)) 
 
 

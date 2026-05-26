@@ -21,6 +21,8 @@ class ProviderType(Enum):
     SILICONFLOW = "siliconflow"  # 硅基流动
     ZHIPU = "zhipu"          # 智谱AI
     TENCENT = "tencent"      # 腾讯混元
+    OLLAMA = "ollama"        # 本地Ollama
+    LMSTUDIO = "lmstudio"    # 本地LM Studio
 
 @dataclass
 class ModelInfo:
@@ -83,13 +85,21 @@ class LLMProvider(ABC):
         """
         pass
     
+    def _format_input_data(self, input_data: Any = None) -> Optional[str]:
+        """统一格式化输入数据：单key dict自动提取值，避免JSON包装噪声"""
+        if input_data is None:
+            return None
+        if isinstance(input_data, dict):
+            if len(input_data) == 1:
+                return str(next(iter(input_data.values())))
+            return json.dumps(input_data, ensure_ascii=False, indent=2)
+        return str(input_data)
+    
     def _build_full_input(self, prompt: str, input_data: Any = None) -> str:
         """构建完整的输入"""
-        if input_data:
-            if isinstance(input_data, dict):
-                return f"{prompt}\n\n输入内容：\n{json.dumps(input_data, ensure_ascii=False, indent=2)}"
-            else:
-                return f"{prompt}\n\n输入内容：\n{input_data}"
+        formatted = self._format_input_data(input_data)
+        if formatted:
+            return f"{prompt}\n\n输入内容：\n{formatted}"
         return prompt
 
 class DashScopeProvider(LLMProvider):
@@ -191,28 +201,35 @@ class OpenAIProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用OpenAI API"""
         try:
-            full_input = self._build_full_input(prompt, input_data)
-            
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages = [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[{"role": "user", "content": full_input}],
+                messages=messages,
                 **kwargs
             )
-            
+
             content = response.choices[0].message.content
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens
             } if response.usage else None
-            
+
             return LLMResponse(
                 content=content,
                 usage=usage,
                 model=self.model_name,
                 finish_reason=response.choices[0].finish_reason
             )
-            
+
         except Exception as e:
             logger.error(f"OpenAI调用失败: {str(e)}")
             raise
@@ -323,47 +340,47 @@ class SiliconFlowProvider(LLMProvider):
     
     def __init__(self, api_key: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", **kwargs):
         super().__init__(api_key, model_name, **kwargs)
-        self.base_url = "https://api.siliconflow.cn/v1"
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key,
+                base_url="https://api.siliconflow.cn/v1"
+            )
+        except ImportError:
+            raise ImportError("请安装openai: pip install openai")
     
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
-        """调用硅基流动API"""
+        """调用硅基流动API（OpenAI兼容接口）"""
         try:
-            import requests
-            
-            full_input = self._build_full_input(prompt, input_data)
-            
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            data = {
-                "model": self.model_name,
-                "messages": [{"role": "user", "content": full_input}],
-                "stream": False,
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages = [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
                 **kwargs
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=30
             )
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            content = result["choices"][0]["message"]["content"]
-            usage = result.get("usage")
-            
+
+            content = response.choices[0].message.content
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if response.usage else None
+
             return LLMResponse(
                 content=content,
                 usage=usage,
                 model=self.model_name,
-                finish_reason=result["choices"][0].get("finish_reason")
+                finish_reason=response.choices[0].finish_reason
             )
-            
+
         except Exception as e:
             logger.error(f"硅基流动调用失败: {str(e)}")
             raise
@@ -432,13 +449,18 @@ class ZhipuProvider(LLMProvider):
         self._init_client()
         
         try:
-            full_input = prompt
-            if input_data:
-                full_input = f"{prompt}\n\n{input_data}"
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages = [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ]
+            else:
+                messages = [{"role": "user", "content": prompt}]
             
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[{"role": "user", "content": full_input}],
+                messages=messages,
                 temperature=kwargs.get("temperature", 0.7),
                 max_tokens=kwargs.get("max_tokens", 2048),
                 stream=False
@@ -498,9 +520,8 @@ class ZhipuProvider(LLMProvider):
 class TencentProvider(LLMProvider):
     """腾讯混元大模型提供商（OpenAI 兼容接口）"""
 
-    def __init__(self, api_key: str, model_name: str = "hunyuan-turbo", secret_key: Optional[str] = None, **kwargs):
+    def __init__(self, api_key: str, model_name: str = "hunyuan-turbo", **kwargs):
         super().__init__(api_key, model_name, **kwargs)
-        # secret_key 参数被接受但忽略，因为腾讯混元使用 OpenAI 兼容接口，只需要 api_key
         try:
             import openai
             self.client = openai.OpenAI(
@@ -513,11 +534,18 @@ class TencentProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用腾讯混元API（OpenAI兼容接口）"""
         try:
-            full_input = self._build_full_input(prompt, input_data)
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages = [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ]
+            else:
+                messages = [{"role": "user", "content": prompt}]
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[{"role": "user", "content": full_input}],
+                messages=messages,
                 **kwargs
             )
 
@@ -610,6 +638,204 @@ class TencentProvider(LLMProvider):
             )
         ]
 
+class OllamaProvider(LLMProvider):
+    """本地Ollama大模型提供商（OpenAI 兼容接口）"""
+
+    def __init__(self, api_key: str, model_name: str = "qwen2.5", base_url: str = "http://localhost:11434/v1", **kwargs):
+        super().__init__(api_key, model_name, **kwargs)
+        self.base_url = base_url
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key or "ollama",
+                base_url=base_url,
+                timeout=600.0,
+                max_retries=0
+            )
+        except ImportError:
+            raise ImportError("请安装 openai: pip install openai")
+
+    def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
+        """调用Ollama API（OpenAI兼容接口）"""
+        try:
+            messages = [{"role": "system", "content": prompt}]
+
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages.append({"role": "user", "content": user_content})
+            else:
+                messages.append({"role": "user", "content": prompt})
+
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+
+            content = response.choices[0].message.content
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if response.usage else None
+
+            return LLMResponse(
+                content=content,
+                usage=usage,
+                model=self.model_name,
+                finish_reason=response.choices[0].finish_reason
+            )
+
+        except Exception as e:
+            logger.error(f"Ollama调用失败: {str(e)}")
+            raise
+
+    def test_connection(self) -> bool:
+        """测试Ollama连接"""
+        try:
+            response = self.call("请回复'测试成功'")
+            return "测试成功" in response.content or "success" in response.content.lower()
+        except Exception as e:
+            logger.error(f"Ollama连接测试失败: {e}")
+            return False
+
+    @staticmethod
+    def get_available_models() -> List[ModelInfo]:
+        """获取Ollama可用模型（返回常用本地模型列表）"""
+        return [
+            ModelInfo(
+                name="qwen2.5",
+                display_name="Qwen2.5（推荐）",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="阿里通义千问Qwen2.5，需提前 pull"
+            ),
+            ModelInfo(
+                name="qwen2.5:7b",
+                display_name="Qwen2.5 7B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="阿里通义千问Qwen2.5 7B，需提前 pull"
+            ),
+            ModelInfo(
+                name="qwen2.5:14b",
+                display_name="Qwen2.5 14B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="阿里通义千问Qwen2.5 14B，需提前 pull"
+            ),
+            ModelInfo(
+                name="qwen2.5:32b",
+                display_name="Qwen2.5 32B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="阿里通义千问Qwen2.5 32B，需提前 pull"
+            ),
+            ModelInfo(
+                name="llama3.1",
+                display_name="Llama 3.1",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="Meta Llama 3.1，需提前 pull"
+            ),
+            ModelInfo(
+                name="llama3.1:8b",
+                display_name="Llama 3.1 8B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="Meta Llama 3.1 8B，需提前 pull"
+            ),
+            ModelInfo(
+                name="deepseek-r1:7b",
+                display_name="DeepSeek R1 7B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="DeepSeek R1 7B，需提前 pull"
+            ),
+            ModelInfo(
+                name="deepseek-r1:14b",
+                display_name="DeepSeek R1 14B",
+                provider=ProviderType.OLLAMA,
+                max_tokens=32768,
+                description="DeepSeek R1 14B，需提前 pull"
+            ),
+        ]
+
+class LMStudioProvider(LLMProvider):
+    """本地LM Studio大模型提供商（OpenAI 兼容接口）"""
+
+    def __init__(self, api_key: str, model_name: str = "qwen2.5-7b-instruct", base_url: str = "http://localhost:1234/v1", **kwargs):
+        super().__init__(api_key, model_name, **kwargs)
+        self.base_url = base_url
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key or "lmstudio",
+                base_url=base_url,
+                timeout=3600.0,
+                max_retries=0
+            )
+        except ImportError:
+            raise ImportError("请安装 openai: pip install openai")
+
+    def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
+        """调用LM Studio API（OpenAI兼容接口）"""
+        try:
+            messages = [{"role": "system", "content": prompt}]
+
+            if input_data is not None:
+                user_content = self._format_input_data(input_data)
+                messages.append({"role": "user", "content": user_content})
+            else:
+                messages.append({"role": "user", "content": prompt})
+
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+
+            content = response.choices[0].message.content
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if response.usage else None
+
+            return LLMResponse(
+                content=content,
+                usage=usage,
+                model=self.model_name,
+                finish_reason=response.choices[0].finish_reason
+            )
+
+        except Exception as e:
+            logger.error(f"LM Studio调用失败: {str(e)}")
+            raise
+
+    def test_connection(self) -> bool:
+        """测试LM Studio连接"""
+        try:
+            response = self.call("请回复'测试成功'")
+            return "测试成功" in response.content or "success" in response.content.lower()
+        except Exception as e:
+            logger.error(f"LM Studio连接测试失败: {e}")
+            return False
+
+    @staticmethod
+    def get_available_models() -> List[ModelInfo]:
+        """获取LM Studio可用模型（返回常用本地模型列表）"""
+        return [
+            ModelInfo(
+                name="qwen2.5-7b-instruct",
+                display_name="Qwen2.5 7B（推荐）",
+                provider=ProviderType.LMSTUDIO,
+                max_tokens=32768,
+                description="通义千问Qwen2.5 7B，需在LM Studio中加载"
+            ),
+        ]
+
+
 class LLMProviderFactory:
     """LLM提供商工厂"""
     
@@ -620,6 +846,8 @@ class LLMProviderFactory:
         ProviderType.SILICONFLOW: SiliconFlowProvider,
         ProviderType.ZHIPU: ZhipuProvider,
         ProviderType.TENCENT: TencentProvider,
+        ProviderType.OLLAMA: OllamaProvider,
+        ProviderType.LMSTUDIO: LMStudioProvider,
     }
     
     @classmethod

@@ -38,6 +38,11 @@ class LLMManager:
             "gemini_api_key": "",
             "siliconflow_api_key": "",
             "zhipu_api_key": "",
+            "tencent_api_key": "",
+            "ollama_api_key": "",
+            "ollama_base_url": "http://localhost:11434/v1",
+            "lmstudio_api_key": "",
+            "lmstudio_base_url": "http://localhost:1234/v1",
             "model_name": "qwen-plus",
             "chunk_size": 5000,
             "min_score_threshold": 0.7,
@@ -73,10 +78,23 @@ class LLMManager:
             # 获取对应提供商的API密钥
             api_key = self._get_api_key_for_provider(provider_type)
             
-            if api_key:
-                self.current_provider = LLMProviderFactory.create_provider(
-                    provider_type, api_key, model_name
-                )
+            if api_key or provider_type in (ProviderType.OLLAMA, ProviderType.LMSTUDIO):
+                # Ollama/LM Studio可以没有API Key（本地连接），传入空字符串
+                effective_api_key = api_key or ""
+                if provider_type == ProviderType.OLLAMA:
+                    base_url = self.settings.get("ollama_base_url", "http://localhost:11434/v1")
+                    self.current_provider = LLMProviderFactory.create_provider(
+                        provider_type, effective_api_key, model_name, base_url=base_url
+                    )
+                elif provider_type == ProviderType.LMSTUDIO:
+                    base_url = self.settings.get("lmstudio_base_url", "http://localhost:1234/v1")
+                    self.current_provider = LLMProviderFactory.create_provider(
+                        provider_type, effective_api_key, model_name, base_url=base_url
+                    )
+                else:
+                    self.current_provider = LLMProviderFactory.create_provider(
+                        provider_type, effective_api_key, model_name
+                    )
                 logger.info(f"已初始化{provider_type.value}提供商，模型: {model_name}")
             else:
                 logger.warning(f"未找到{provider_type.value}的API密钥")
@@ -84,7 +102,7 @@ class LLMManager:
         except Exception as e:
             logger.error(f"初始化提供商失败: {e}")
             self.current_provider = None
-    
+
     def _get_api_key_for_provider(self, provider_type: ProviderType) -> Optional[str]:
         """获取指定提供商的API密钥"""
         key_mapping = {
@@ -94,6 +112,8 @@ class LLMManager:
             ProviderType.SILICONFLOW: "siliconflow_api_key",
             ProviderType.ZHIPU: "zhipu_api_key",
             ProviderType.TENCENT: "tencent_api_key",
+            ProviderType.OLLAMA: "ollama_api_key",
+            ProviderType.LMSTUDIO: "lmstudio_api_key",
         }
         
         key_name = key_mapping.get(provider_type)
@@ -124,6 +144,8 @@ class LLMManager:
                 ProviderType.SILICONFLOW: "siliconflow_api_key",
                 ProviderType.ZHIPU: "zhipu_api_key",
                 ProviderType.TENCENT: "tencent_api_key",
+                ProviderType.OLLAMA: "ollama_api_key",
+                ProviderType.LMSTUDIO: "lmstudio_api_key",
             }
             
             key_name = key_mapping.get(provider_type)
@@ -133,9 +155,20 @@ class LLMManager:
             self.update_settings(provider_settings)
             
             # 创建新的提供商实例
-            self.current_provider = LLMProviderFactory.create_provider(
-                provider_type, api_key, model_name
-            )
+            if provider_type == ProviderType.OLLAMA:
+                base_url = self.settings.get("ollama_base_url", "http://localhost:11434/v1")
+                self.current_provider = LLMProviderFactory.create_provider(
+                    provider_type, api_key, model_name, base_url=base_url
+                )
+            elif provider_type == ProviderType.LMSTUDIO:
+                base_url = self.settings.get("lmstudio_base_url", "http://localhost:1234/v1")
+                self.current_provider = LLMProviderFactory.create_provider(
+                    provider_type, api_key, model_name, base_url=base_url
+                )
+            else:
+                self.current_provider = LLMProviderFactory.create_provider(
+                    provider_type, api_key, model_name
+                )
             
             logger.info(f"已切换到{provider_type.value}提供商，模型: {model_name}")
             
@@ -155,8 +188,9 @@ class LLMManager:
             logger.error(f"LLM调用失败: {e}")
             raise
     
-    def call_with_retry(self, prompt: str, input_data: Any = None, max_retries: int = 3, **kwargs) -> str:
+    def call_with_retry(self, prompt: str, input_data: Any = None, max_retries: int = 3, timeout: int = 60, **kwargs) -> str:
         """带重试机制的LLM调用"""
+        import time
         for attempt in range(max_retries):
             try:
                 return self.call(prompt, input_data, **kwargs)
@@ -165,16 +199,16 @@ class LLMManager:
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error(f"LLM调用在{max_retries}次重试后彻底失败。")
-                    raise
+                    raise RuntimeError(f"LLM调用在{max_retries}次重试后彻底失败: {e}") from e
                 logger.warning(f"第{attempt + 1}次调用失败，准备重试: {str(e)}")
-                import time
-                time.sleep(2 ** attempt)  # 指数退避
-        return ""
+                wait_time = min(2 ** attempt, 30)  # 指数退避，最大等待30秒
+                time.sleep(wait_time)
+        raise RuntimeError(f"LLM调用在{max_retries}次重试后彻底失败")
     
-    def test_provider_connection(self, provider_type: ProviderType, api_key: str, model_name: str, secret_key: Optional[str] = None) -> bool:
+    def test_provider_connection(self, provider_type: ProviderType, api_key: str, model_name: str) -> bool:
         """测试提供商连接"""
         try:
-            provider = LLMProviderFactory.create_provider(provider_type, api_key, model_name, secret_key=secret_key)
+            provider = LLMProviderFactory.create_provider(provider_type, api_key, model_name)
             return provider.test_connection()
         except Exception as e:
             logger.error(f"测试{provider_type.value}连接失败: {e}")
@@ -203,7 +237,9 @@ class LLMManager:
             ProviderType.GEMINI: "Google Gemini",
             ProviderType.SILICONFLOW: "硅基流动",
             ProviderType.ZHIPU: "智谱AI",
-            ProviderType.TENCENT: "腾讯混元"
+            ProviderType.TENCENT: "腾讯混元",
+            ProviderType.OLLAMA: "本地Ollama",
+            ProviderType.LMSTUDIO: "本地LM Studio"
         }
         return display_names.get(provider_type, provider_type.value)
     
@@ -227,15 +263,44 @@ class LLMManager:
         return result
     
     def parse_json_response(self, response: str) -> Any:
-        """解析JSON响应（保持与原LLMClient的兼容性）"""
+        """解析JSON响应，支持清理尾逗号等LLM常见错误"""
         if not self.current_provider:
             raise ValueError("未配置LLM提供商")
-        
-        # 这里可以复用原LLMClient的JSON解析逻辑
-        # 为了保持兼容性，我们创建一个临时的LLMClient实例
-        from backend.utils.llm_client import LLMClient
-        temp_client = LLMClient()
-        return temp_client.parse_json_response(response)
+
+        import json
+        import re
+
+        def clean_trailing_commas(text: str) -> str:
+            return re.sub(r',\s*([\]}])', r'\1', text)
+
+        # 1. 直接解析
+        try:
+            return json.loads(clean_trailing_commas(response))
+        except json.JSONDecodeError:
+            pass
+
+        # 2. 从 ```json ``` 代码块中提取
+        for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response):
+            start = block.find('[') if '[' in block else block.find('{')
+            end = block.rfind(']') if ']' in block else block.rfind('}')
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(clean_trailing_commas(block[start:end + 1]))
+                except json.JSONDecodeError:
+                    pass
+
+        # 3. 从文本中提取第一个 JSON 数组或对象
+        for open_b, close_b in [('[', ']'), ('{', '}')]:
+            start = response.find(open_b)
+            end = response.rfind(close_b)
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(clean_trailing_commas(response[start:end + 1]))
+                except json.JSONDecodeError:
+                    pass
+
+        logger.warning(f"无法解析LLM响应，响应长度: {len(response)}")
+        return None
 
 # 全局LLM管理器实例
 _llm_manager: Optional[LLMManager] = None

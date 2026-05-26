@@ -3,6 +3,7 @@
 """
 import logging
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import json
@@ -48,6 +49,8 @@ FUNCLIP_TITLE_PROMPT = """你是一个短视频标题策划专家。根据下方
 1. **忠于原文**: 标题必须严格基于下方字幕文本，不得无中生有。
 2. **突出亮点**: 精准捕捉片段最核心的观点、最激烈的情绪或最有价值的信息。
 3. **精炼有力**: 简洁有冲击力，8~20个中文字符，可加感叹号。
+4. **用语规范**: 禁用低俗词汇（装逼、傻逼、他妈的等），字幕中的低俗措辞需替换为中性表述（犀利点评、直率吐槽）。
+5. **钩子写法优先**: 优先使用设问/悬念/对比/数字等钩子句式（如"为什么XX能卖爆？""XX的3个真相"），避免平铺直叙的"XX介绍""XX讨论"。
 
 ## 该片段的字幕文本
 {clip_srt_text}
@@ -62,6 +65,207 @@ FUNCLIP_TITLE_PROMPT = """你是一个短视频标题策划专家。根据下方
 
 ## 输出
 只输出标题文本，不要引号、序号或任何额外内容。
+"""
+
+# ============================================================
+# 三步方案 Prompt：Step 1 边界识别（仅识别话题边界，不评分不生成标题）
+# ============================================================
+FUNCLIP_STEP1_BOUNDARY_PROMPT = """## 任务
+分析下方SRT字幕，识别所有独立话题的边界。你的任务是**划分话题边界**，不是评分。
+只输出JSON数组，不要任何解释或分析。
+
+## 输出格式（严格遵守）
+```json
+[
+  {
+    "id": "1",
+    "outline": "话题内容概述（基于实际SRT内容，50字以内）",
+    "topic_type": "knowledge",
+    "segments": [
+      {"start": "00:01:00,000", "end": "00:05:30,000"},
+      {"start": "00:12:00,000", "end": "00:14:00,000"}
+    ]
+  },
+  {
+    "id": "2",
+    "outline": "话题内容概述",
+    "topic_type": "highlight",
+    "segments": [
+      {"start": "00:08:00,000", "end": "00:09:30,000"}
+    ]
+  }
+]
+```
+
+**topic_type 分类**（必须准确归类）：
+- highlight: 冲突金句、情绪爆发、怼人名场面、激烈观点交锋
+- knowledge: 干货知识、技能讲解、深度分析
+- product: 产品推销、卖货讲解、优惠介绍
+- fun: 趣味段子、搞笑互动、娱乐内容
+- daily: 日常闲聊、普通互动、一般性讲述
+
+**segments 规则**：
+- 同一话题可能被其他话题打断，出现在时间轴多段，需用多个segment表示
+- segments 按时间升序排列
+- 时间格式 hh:mm:ss,fff（逗号分隔毫秒）
+- 起止时间必须对齐SRT条目首尾时间戳，严禁切割单条字幕
+
+## 输入数据格式
+SRT字幕包含序号、时间范围和文本三部分：
+```
+1
+00:00:00,000 --> 00:00:05,000
+大家好欢迎来到直播间
+```
+
+## 关键概念：什么是"完整话题"
+
+一个完整话题是一组逻辑上相互依赖的对话单元。判定方法是**依赖链检验**：
+> 去掉某段内容后，另一段变得不完整或难以理解 → 同话题
+
+### 前向依赖检验（相邻条目对SRT N和N+1）
+SRT(N+1)是否假设观众已经知道SRT(N)的信息？
+- 指代词：这/那/他/它 → "这个评论"
+- 因果词：为什么/所以/因此/因为 → "为什么王爷势力复杂"
+- 承前词：刚才/说到/提到/那你说 → "刚才那个顺口溜"
+- 对前文某表述的回应、解释、举例或延伸
+满足任意一条 → 依赖成立 → 同话题
+
+### 收尾检验（判断话题边界）
+SRT(N)是否达到了收尾状态？
+- 结论性表述：总之/所以说/明白了吧/你知道吧
+- 从具体案例回到一般性总结
+满足收尾 + SRT(N+1)不依赖SRT(N) → 此处为自然话题边界
+
+**情绪连续不拆分例外**：
+如果SRT(N)看似收尾，但SRT(N+1)与之满足以下任一条件，则视为未收尾，必须合并：
+① **同一情绪线延续**：SRT(N+1)继续在同一语境下发表评论/吐槽/怼人，话题关键词一致
+② **同一叙事延续**：SRT(N+1)引用/回指SRT(N)中提到的具体细节
+③ **同一对话对象延续**：SRT(N)和SRT(N+1)针对同一观众/事件的连续回应
+
+### 跨段话题合并（被其他话题打断的场景）
+同一话题可能被其他话题打断，出现在时间线多段。**归属同一话题**的条件：
+- 后文是对前文的补充、举例、延伸、深化
+- 后文是主播的个人经历结合来说明前文观点
+- 后文是对前文观点的总结、呼应
+
+**判定为新话题**的条件（满足任意一条）：
+- 主播明确说"换个话题""接下来说说""再聊一个"等换场话术
+- 前后内容语义完全无关，且无过渡衔接
+- 时间间隔超过180秒，中间穿插3个及以上独立无关话题，无语义承接
+
+**语义优先级兜底**：不论间隔和穿插数量，存在内容承接、观点回溯或明显语义延续 → 优先判定为同话题。但前文已有明确收尾总结的，后续即使出现相同关键词也不再自动承接。
+
+**不得强行合并**：语义完全无关的内容（如产品卖货、闲聊段子、正经知识讲解分别属于不同类别），即使由同一主播连续说出，也应为不同话题独立输出。
+
+## 数量控制
+- 输出 4~8 个话题，按时间升序排列 id
+- 没有可提取的内容时输出 []
+"""
+
+# ============================================================
+# 三步方案 Prompt：Step 2 批量评分（边界已确定，仅评分 + 可选边界建议）
+# ============================================================
+FUNCLIP_STEP2_BATCH_SCORE_PROMPT = """## 重要前提
+以下话题的边界已经过专业分析确定，你**不需要、也不应该**质疑或重新评估边界。
+你的唯一任务是对内容质量进行评分。即使你认为某个话题的边界可以更优，也请基于给定的SRT片段进行评分。
+
+## 任务
+对下方所有话题做评分。你必须在同一次判断中横向比较它们，确保评分可比较。
+
+## 所有话题
+```json
+[
+  {
+    "id": "1",
+    "outline": "话题概述",
+    "topic_type": "knowledge",
+    "total_duration_seconds": 185,
+    "srt_text": "00:01:00,000 --> 00:01:05,000\\n这是第一条字幕内容...\\n...(完整SRT)"
+  }
+]
+```
+
+## 评分维度（注意：仅评分，不修改边界）
+- 看点价值(0~1): 冲突金句/独家信息/情绪爆发。锚点：0.9=金句冲突，0.7=干货知识，0.5=日常讲述
+- 话题完整度(0~1): 引入+核心+收尾的完整度。锚点：0.9=三段完整，0.7=有核心+收尾，0.5=仅核心
+- 叙事流畅度(0~1): 逻辑连贯性。锚点：0.9=一气呵成，0.7=偶尔卡顿，0.5=多处卡顿
+
+## 计算
+final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
+
+## 输出
+```json
+{
+  "scores": [
+    {
+      "id": "1",
+      "final_score": 0.75,
+      "sub_scores": {"看点价值": 0.8, "话题完整度": 0.7, "叙事流畅度": 0.7},
+      "recommend_reason": "基于实际内容的推荐理由（≤20字）",
+      "boundary_suggestion": null
+    }
+  ]
+}
+```
+为**每一个**输入话题打分并输出，不要跳过任何话题。不要自行过滤低分话题。
+recommend_reason 每条不同，基于实际内容，≤20字。
+boundary_suggestion 为 null 或字符串（格式见下方说明）。
+
+## boundary_suggestion 字段（可选）
+如果你在评分过程中发现某个话题的边界存在明显问题（例如：开头缺少必要的引入铺垫、结尾被过早截断、或者包含了明显不属于该话题的内容），你可以在此字段给出建议。格式为：
+
+"建议[扩展/收缩/前移/后移]边界：[具体说明，含建议的时间偏移秒数]"
+
+示例：
+- "建议扩展开头：话题开头缺少产品引入铺垫，00:01:00前约30秒有铺垫内容，建议前移30秒以包含引入"
+- "建议收缩结尾：00:08:30之后的内容已切换到下一话题，建议后移-15秒"
+- "建议前移开头：当前开头落在了一条SRT的中间位置，建议前移5秒对齐SRT边界"
+- "建议移除内部段：segment #2 的内容与该话题无关，属于误归类"
+
+如果你认为边界没有问题，请填写 null。大多数情况下此字段应为 null。
+
+注意：此字段仅作为建议供后续代码参考，不会自动修改边界。
+"""
+
+# ============================================================
+# 三步方案 Prompt：Step 3 批量标题生成
+# ============================================================
+FUNCLIP_STEP3_BATCH_TITLE_PROMPT = """## 任务
+为下方每个话题独立生成一个吸引人的短视频标题。每个标题必须基于该话题的实际SRT内容。
+
+## 核心原则
+1. **忠于原文**: 标题必须严格基于该话题的SRT文本，不得无中生有。
+2. **突出亮点**: 精准捕捉片段最核心的观点、最激烈的情绪或最有价值的信息。
+3. **精炼有力**: 简洁有冲击力，8~20个中文字符，可加感叹号。
+4. **用语规范**: 禁用低俗词汇（装逼、傻逼、他妈的等），字幕中的低俗措辞需替换为中性表述（如犀利点评、直率吐槽）。
+5. **钩子写法优先**: 优先使用设问/悬念/对比/数字等钩子句式，避免平铺直叙。
+6. **差异化**: 每个话题的标题必须不同，不可重复。
+
+## 所有话题
+```json
+[
+  {
+    "id": "1",
+    "outline": "话题概述",
+    "topic_type": "knowledge",
+    "recommend_reason": "推荐理由",
+    "srt_text": "00:01:00,000 --> 00:01:05,000\\n第一条字幕...\\n...(该话题的完整SRT)"
+  }
+]
+```
+
+## 输出
+```json
+{
+  "titles": [
+    {"id": "1", "title": "生成的标题文本"},
+    {"id": "2", "title": "生成的标题文本"}
+  ]
+}
+```
+为**每一个**输入话题生成标题，不要跳过。
+每个标题8~20个中文字符，禁止低俗词汇。
 """
 
 # ============================================================
@@ -136,6 +340,14 @@ SRT(N)是否达到了收尾状态？
 - 从具体案例回到一般性总结
 满足收尾 + SRT(N+1)不依赖SRT(N) → 此处为自然话题边界
 
+**情绪连续不拆分例外**：
+如果SRT(N)看似收尾，但SRT(N+1)与之满足以下任一条件，则视为未收尾，必须合并：
+① **同一情绪线延续**：SRT(N+1)继续在同一语境下发表评论/吐槽/怼人，话题关键词（人物、事件、产品）一致
+② **同一叙事延续**：SRT(N+1)引用/回指SRT(N)中提到的具体细节
+③ **同一对话对象延续**：SRT(N)和SRT(N+1)针对同一观众/同一事件的连续回应
+
+**判断方法**：去掉收尾词后，SRT(N)和SRT(N+1)是否仍然是同一段连贯语流？如是，则未收尾，合并。除非SRT(N+1)使用了明确换场话术（"接下来说说""换个话题"）。
+
 ### 跨间隙语义验证（4~60秒间隙）
 ASR产生的短SRT条目可能制造虚假间隙。相邻短条目（每条≤3秒，间隙≤3秒）先合并为语义段落再做话题分析。
 跨间隙判定（同话题依条件）：
@@ -208,7 +420,7 @@ final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
 - **常规日常讲述**：过渡铺垫、流程介绍、无亮点日常对话
 同优先级内按分数降序排列。仅输出final_score ≥ 0.5的片段，低于0.5的不纳入输出。
 最多取前**6个**作为最终输出。
-单个segment时长建议10秒~5分钟。低于10秒的短片段，如果语义上可自然合并到相邻主话题则合并，否则保留独立（高评分短金句不应被强制合并）。
+单个segment时长建议10秒~5分钟。最终输出的话题**总播放时长建议不低于20秒**（多个segment之和）。低于20秒的短话题，如果语义上可自然合并到相邻主话题则优先合并；无法合并的高评分短金句（评分≥0.7）可保留独立输出，但须在推荐理由中标注"短精华"。
 
 ### 第五步：自检复核
 1. **被选中片段**的所有SRT条目均完成归属，无遗漏无交叉（未选中的话题SRT无需覆盖标注）
@@ -223,7 +435,7 @@ final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
 | 字段 | 说明 |
 |------|------|
 | id | 在完成打分和排序、取前6个输出后，按起始时间升序重新编号："1","2","3"... |
-| title | 完整概括话题从引入到收尾全流程的标题 |
+| title | 概括话题核心看点的标题，用语正面积极，禁用低俗词汇。不得直接照搬字幕中的原始低俗措辞（装逼/傻逼/他妈的等），需替换为中性或正面表述（犀利点评/直率吐槽/独特见解） |
 | outline | 描述从引入到收尾的全部话题内容梗概 |
 | segments | 话题分散的多段时间区间数组，按开始时间升序排列 |
 | final_score | 0~1浮点数 |
@@ -238,10 +450,30 @@ final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
 5. 文本不可剔除，所有带文本的SRT条目保留在segments中
 6. 多人连麦围绕同一主题发言时统一合并为单个话题，不按人物拆分
 7. 话题无收尾话术而戛然中止时以最后一句核心论述的时间戳作为结束边界
-8. 自动过滤低俗敏感违规内容，含违规内容的片段降低评分优先级
+8. 低俗词汇的过滤规则：
+    - 低俗/侮辱性措辞只影响标题生成（标题中替换为中性表述），不影响内容价值评分
+    - **例外**：如果该片段的核心看点是知识分享、剧情讲解、产品引出的前置铺垫——即使含有少量低俗口语化表达，应保留内容价值评分，仅在标题中做中性化处理；不得因低俗用词将整段有价值话题丢弃
 9. 最多6个独立话题片段，最少输出2个（字幕只有单个话题时最少1个）
 10. 仅输出JSON数组，禁止增加多余文字、注释或说明内容
-11. **产品推销内容必须独立输出**：卖货话术、产品功能介绍、优惠活动讲解等与知识分享/闲聊段子属于不同话题类型，即使紧挨着知识话题也要单独成段输出，不可合并到其他话题中"""
+11. **产品推介按引出方式处理**：
+    (a) **自然引出应合并**：如果产品是从话题内容自然延伸出来的——如"电影里的撒尿牛丸→我们家的牛肉丸"、"说到XX问题/场景→我家产品就是这个效果"——则属于"自然过渡不拆分"场景，应合并为同一话题
+    (b) **突兀出现应独立**：如果产品讲解与前后话题无内容承接关系（如刚聊完历史突然说"来，上链接"），则独立输出为单独卖货话题
+    (c) **多个独立产品互不合并**：连续介绍的多个不同产品（先卖牛肉丸再卖鸡蛋再卖手表）各自为独立话题
+    **判断方法**：去掉产品讲解部分，看前文话题是否完整自洽。完整自洽→产品独立；不完整（缺少铺垫/过渡）→产品是自然延伸。
+12. **标题用语规范**：
+    - 禁用低俗词汇：装逼/傻逼/他妈的/逼味等，标题中必须替换为中性表述（犀利点评/直率吐槽/独特见解）
+    - 禁用直接侮辱性表述：字幕中怼人/骂人的内容，标题用"对XX的独特看法""引发争议的观点"等中性化概括
+    - 标题须独立创作，不得照抄字幕中任何原始措辞
+13. **跨话题连续性检测**：
+    多个CLIP在供给阶段是独立切分的，合并阶段须检测相邻CLIP的话题边界：
+    - 如果某个CLIP的最后1~3条SRT与另一个CLIP的开头明显是同一话题的延续
+      （如"那个就是河北人做采购的"→"那个隔着电话都逼逼味十足"），
+      则这两个CLIP应视为同一话题，合并为一个segment组
+    - 判断标志：两段内容共享核心关键词（同一人物/事件/产品/地域）、
+      存在明显的指代承接（"那个""就是""他们"指向同一对象）、
+      去掉CLIP边界后前后是连贯的一段话
+    - 产品/商品名称本身不构成话题合并依据
+      （如CLIP1提到"手表"，CLIP2详细讲"手表功能"→仍需检查内容是否在同一叙事线内）"""
 
 # 填充词列表（预处理时剔除——只剔除无意义的口吃/犹豫/套话）
 FILLER_WORDS = {
@@ -501,91 +733,6 @@ def _parse_srt_timeline(srt_text: str) -> List[Dict]:
     return entries
 
 
-# Silero VAD 模型（懒加载）
-_silero_vad_model = None
-
-def _get_silero_vad_model():
-    global _silero_vad_model
-    if _silero_vad_model is None:
-        try:
-            from silero_vad import load_silero_vad
-            _silero_vad_model = load_silero_vad()
-            logger.info("Silero VAD 模型加载成功")
-        except Exception as e:
-            logger.error(f"Silero VAD 模型加载失败: {e}")
-            return None
-    return _silero_vad_model
-
-
-def _detect_vad_silence_in_audio(audio_path: str, 
-                                  min_silence_duration: float = 2.0,
-                                  vad_threshold: float = 0.5) -> List[tuple]:
-    """
-    使用 Silero VAD 检测整段音频中的静音区间
-
-    Args:
-        audio_path: 音频文件路径（支持 wav/mp3 等格式）
-        min_silence_duration: 最短静音时长（秒）
-        vad_threshold: VAD 语音概率阈值
-
-    Returns:
-        静音区间列表 [(start_sec, end_sec), ...]
-    """
-    model = _get_silero_vad_model()
-    if model is None:
-        return []
-
-    try:
-        import soundfile as sf
-        import numpy as np
-        import torch
-        from silero_vad import get_speech_timestamps
-
-        y, orig_sr = sf.read(audio_path)
-
-        if len(y.shape) > 1:
-            y = np.mean(y, axis=1)
-
-        if orig_sr != 16000:
-            import librosa
-            y = librosa.resample(y, orig_sr=orig_sr, target_sr=16000)
-            sr = 16000
-        else:
-            sr = orig_sr
-
-        duration = len(y) / sr
-        logger.info(f"VAD加载音频完成: {duration:.1f}s @ {sr}Hz, {audio_path}")
-
-        waveform = torch.from_numpy(y).float()
-        speech_segs = get_speech_timestamps(
-            waveform, model,
-            threshold=vad_threshold,
-            min_speech_duration_ms=250,
-            min_silence_duration_ms=int(min_silence_duration * 1000),
-            return_seconds=True
-        )
-        logger.info(f"VAD检测到 {len(speech_segs)} 段语音")
-
-        silence_list = []
-        prev_end = 0.0
-        for seg in speech_segs:
-            start = seg['start']
-            if start - prev_end >= min_silence_duration:
-                silence_list.append((prev_end, start))
-            prev_end = seg['end']
-        if duration - prev_end >= min_silence_duration:
-            silence_list.append((prev_end, duration))
-
-        logger.info(f"VAD检测到 {len(silence_list)} 段静音(>= {min_silence_duration}s)")
-        return silence_list
-
-    except Exception as e:
-        logger.error(f"VAD音频静音检测异常: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return []
-
-
 def _filter_vad_silence_by_segments(vad_silence: List[tuple],
                                      segments: List[Dict],
                                      min_silence_duration: float = 2.0) -> List[Dict]:
@@ -776,6 +923,404 @@ def _convert_time_to_millis(time_str):
         return 0
 
 
+# ============================================================
+# 三步方案工具函数：boundary_suggestion 处理（P0修复3）
+# ============================================================
+
+def _apply_boundary_suggestions(
+    topics: List[Dict],
+    scores: List[Dict],
+    srt_entries: List[Dict]
+) -> List[Dict]:
+    """
+    处理 Step 2 返回的 boundary_suggestion，验证并应用合理的建议。
+
+    建议应用规则：
+    1. 扩展开头：新起点必须对齐某条SRT的首时间戳
+    2. 收缩结尾：新终点必须对齐某条SRT的尾时间戳
+    3. 前移/后移：同扩展/收缩
+    4. 移除内部段：只有当移除后话题仍有 ≥ 1 个 segment 时才执行
+    5. 激进建议（移动 > 60 秒）→ 忽略（可能是 LLM 幻觉）
+    """
+    applied_count = 0
+    max_suggestions_per_topic = 2
+
+    for score_item in scores:
+        suggestion = score_item.get('boundary_suggestion')
+        if not suggestion or suggestion == 'null' or suggestion == 'None':
+            continue
+
+        topic_id = score_item.get('id')
+        topic = next((t for t in topics if t.get('id') == topic_id), None)
+        if not topic:
+            continue
+
+        segments = topic.get('segments', [])
+        if not segments:
+            continue
+
+        suggestion_lower = suggestion.lower()
+        handled = False
+
+        if '扩展' in suggestion and ('开头' in suggestion or '向前' in suggestion):
+            _handle_extend_start(suggestion, topic, segments, srt_entries)
+
+        elif '扩展' in suggestion and ('结尾' in suggestion or '向后' in suggestion):
+            _handle_extend_end(suggestion, topic, segments, srt_entries)
+
+        elif '收缩' in suggestion and '结尾' in suggestion:
+            _handle_shrink_end(suggestion, topic, segments, srt_entries)
+
+        elif '收缩' in suggestion and '开头' in suggestion:
+            _handle_shrink_start(suggestion, topic, segments, srt_entries)
+
+        elif '移除' in suggestion and ('内部' in suggestion or 'segment' in suggestion_lower):
+            _handle_remove_segment(suggestion, topic, segments)
+
+        elif '前移' in suggestion:
+            _handle_extend_start(suggestion, topic, segments, srt_entries)
+
+        elif '后移' in suggestion:
+            _handle_shrink_start(suggestion, topic, segments, srt_entries)
+
+        else:
+            logger.info(f"boundary_suggestion 格式无法解析，跳过: {suggestion[:100]}")
+
+    return topics
+
+
+def _handle_extend_start(suggestion: str, topic: Dict, segments: List[Dict],
+                          srt_entries: List[Dict]):
+    time_match = re.search(r'(\d+)\s*秒', suggestion)
+    extend_seconds = int(time_match.group(1)) if time_match else 10
+
+    if extend_seconds > 60:
+        logger.warning(f"扩展建议偏移量过大({extend_seconds}秒)，可能是LLM幻觉，跳过")
+        return
+
+    first_seg_start = _srt_time_to_seconds(segments[0]['start'])
+    new_start_sec = max(0, first_seg_start - extend_seconds)
+
+    aligned_start = _align_to_srt_start(new_start_sec, srt_entries)
+
+    if aligned_start is not None and aligned_start < first_seg_start:
+        segments[0]['start'] = _seconds_to_srt_time(aligned_start)
+        logger.info(
+            f"boundary_suggestion 已应用: 话题{topic['id']} 开头前移 "
+            f"{first_seg_start - aligned_start:.1f}秒 → {_seconds_to_srt_time(aligned_start)}"
+        )
+
+
+def _handle_shrink_end(suggestion: str, topic: Dict, segments: List[Dict],
+                        srt_entries: List[Dict]):
+    time_match = re.search(r'(\d+)\s*秒', suggestion)
+    shrink_seconds = int(time_match.group(1)) if time_match else 10
+
+    if shrink_seconds > 60:
+        logger.warning(f"收缩建议偏移量过大({shrink_seconds}秒)，可能是LLM幻觉，跳过")
+        return
+
+    last_seg_end = _srt_time_to_seconds(segments[-1]['end'])
+    new_end_sec = last_seg_end - shrink_seconds
+
+    aligned_end = _align_to_srt_end(new_end_sec, srt_entries)
+
+    if aligned_end is not None and aligned_end < last_seg_end:
+        segments[-1]['end'] = _seconds_to_srt_time(aligned_end)
+        logger.info(
+            f"boundary_suggestion 已应用: 话题{topic['id']} 结尾收缩 "
+            f"{last_seg_end - aligned_end:.1f}秒 → {_seconds_to_srt_time(aligned_end)}"
+        )
+
+
+def _handle_shrink_start(suggestion: str, topic: Dict, segments: List[Dict],
+                          srt_entries: List[Dict]):
+    time_match = re.search(r'(\d+)\s*秒', suggestion)
+    shrink_seconds = int(time_match.group(1)) if time_match else 10
+
+    if shrink_seconds > 60:
+        return
+
+    first_seg_start = _srt_time_to_seconds(segments[0]['start'])
+    new_start_sec = first_seg_start + shrink_seconds
+
+    aligned_start = _align_to_srt_start(new_start_sec, srt_entries)
+
+    if aligned_start is not None and aligned_start > first_seg_start:
+        segments[0]['start'] = _seconds_to_srt_time(aligned_start)
+        logger.info(
+            f"boundary_suggestion 已应用: 话题{topic['id']} 开头后移 "
+            f"{aligned_start - first_seg_start:.1f}秒 → {_seconds_to_srt_time(aligned_start)}"
+        )
+
+
+def _handle_extend_end(suggestion: str, topic: Dict, segments: List[Dict],
+                        srt_entries: List[Dict]):
+    time_match = re.search(r'(\d+)\s*秒', suggestion)
+    extend_seconds = int(time_match.group(1)) if time_match else 10
+
+    if extend_seconds > 60:
+        return
+
+    last_seg_end = _srt_time_to_seconds(segments[-1]['end'])
+    new_end_sec = last_seg_end + extend_seconds
+
+    aligned_end = _align_to_srt_end(new_end_sec, srt_entries)
+
+    if aligned_end is not None and aligned_end > last_seg_end:
+        segments[-1]['end'] = _seconds_to_srt_time(aligned_end)
+        logger.info(
+            f"boundary_suggestion 已应用: 话题{topic['id']} 结尾后移 "
+            f"{aligned_end - last_seg_end:.1f}秒 → {_seconds_to_srt_time(aligned_end)}"
+        )
+
+
+def _handle_remove_segment(suggestion: str, topic: Dict, segments: List[Dict]):
+    seg_match = re.search(r'segment\s*#?\s*(\d+)', suggestion, re.IGNORECASE)
+    if not seg_match:
+        return
+    seg_idx = int(seg_match.group(1)) - 1
+
+    if seg_idx < 0 or seg_idx >= len(segments):
+        return
+
+    if len(segments) <= 1:
+        logger.warning(f"boundary_suggestion 拒绝: 话题{topic['id']} 只有1个segment，不能移除")
+        return
+
+    removed_seg = segments.pop(seg_idx)
+    logger.info(
+        f"boundary_suggestion 已应用: 移除话题{topic['id']}的segment#{seg_idx+1} "
+        f"({removed_seg['start']} -> {removed_seg['end']})"
+    )
+
+
+def _align_to_srt_start(target_sec: float, srt_entries: List[Dict]) -> Optional[float]:
+    best = None
+    for entry in srt_entries:
+        if entry['start'] <= target_sec:
+            if best is None or entry['start'] > best:
+                best = entry['start']
+    return best
+
+
+def _align_to_srt_end(target_sec: float, srt_entries: List[Dict]) -> Optional[float]:
+    best = None
+    for entry in srt_entries:
+        if entry['end'] >= target_sec:
+            if best is None or entry['end'] < best:
+                best = entry['end']
+    return best
+
+
+# ============================================================
+# 三步方案工具函数：token 预估与自动分批（P0修复4）
+# ============================================================
+
+ZH_CHAR_TO_TOKEN_RATIO = 2.0
+DEFAULT_MAX_TOKENS = 8192
+TOKEN_SAFETY_MARGIN = 0.8
+RESERVED_OUTPUT_TOKENS = 2048
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    other_chars = len(text) - chinese_chars
+    return int(chinese_chars * ZH_CHAR_TO_TOKEN_RATIO + other_chars * 0.3)
+
+
+def _should_batch_step2(topics_with_srt: List[Dict], max_tokens: int = None) -> bool:
+    if max_tokens is None:
+        max_tokens = DEFAULT_MAX_TOKENS
+
+    prompt_tokens = _estimate_tokens(FUNCLIP_STEP2_BATCH_SCORE_PROMPT)
+    total_input_tokens = prompt_tokens
+
+    for topic in topics_with_srt:
+        total_input_tokens += _estimate_tokens(topic.get('srt_text', ''))
+        total_input_tokens += _estimate_tokens(json.dumps({
+            'id': topic.get('id'),
+            'outline': topic.get('outline'),
+            'topic_type': topic.get('topic_type'),
+            'total_duration_seconds': topic.get('total_duration_seconds')
+        }, ensure_ascii=False))
+
+    effective_limit = int(max_tokens * TOKEN_SAFETY_MARGIN) - RESERVED_OUTPUT_TOKENS
+    return total_input_tokens > effective_limit
+
+
+def _split_topics_by_priority(topics_with_srt: List[Dict]) -> tuple:
+    TYPE_PRIORITY = {'highlight': 1, 'knowledge': 1, 'product': 2, 'fun': 2, 'daily': 2}
+    batch1 = [t for t in topics_with_srt if TYPE_PRIORITY.get(t.get('topic_type'), 2) == 1]
+    batch2 = [t for t in topics_with_srt if TYPE_PRIORITY.get(t.get('topic_type'), 2) == 2]
+    return batch1, batch2
+
+
+# ============================================================
+# 三步方案工具函数：检查点持久化（P0修复5）
+# ============================================================
+
+CHECKPOINT_DIR_NAME = "pipeline_checkpoints"
+
+
+class PipelineCheckpoint:
+    """三步流水线检查点管理器"""
+
+    def __init__(self, metadata_dir: Path):
+        self.checkpoint_dir = metadata_dir / CHECKPOINT_DIR_NAME
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_file = self.checkpoint_dir / "three_step_state.json"
+        self._state = self._load()
+
+    def _load(self) -> Dict:
+        if self.checkpoint_file.exists():
+            try:
+                with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {
+            'version': 1,
+            'created_at': time.time(),
+            'steps': {}
+        }
+
+    def _save(self):
+        self._state['updated_at'] = time.time()
+        with open(self.checkpoint_file, 'w', encoding='utf-8') as f:
+            json.dump(self._state, f, ensure_ascii=False, indent=2)
+
+    def has_step(self, step_name: str) -> bool:
+        return step_name in self._state.get('steps', {})
+
+    def get_step_output(self, step_name: str) -> Optional[Any]:
+        step = self._state.get('steps', {}).get(step_name)
+        if step and step.get('status') == 'success':
+            return step.get('output')
+        return None
+
+    def save_step_output(self, step_name: str, output: Any, metadata: Dict = None):
+        self._state.setdefault('steps', {})[step_name] = {
+            'status': 'success',
+            'output': output,
+            'timestamp': time.time(),
+            'retry_count': self._state['steps'].get(step_name, {}).get('retry_count', 0),
+            'metadata': metadata or {}
+        }
+        self._save()
+
+    def mark_step_failed(self, step_name: str, error: str):
+        step = self._state.setdefault('steps', {}).setdefault(step_name, {})
+        step['status'] = 'failed'
+        step['error'] = str(error)[:500]
+        step['retry_count'] = step.get('retry_count', 0) + 1
+        step['timestamp'] = time.time()
+        self._save()
+
+    def should_retry(self, step_name: str, max_retries: int = 2) -> bool:
+        step = self._state.get('steps', {}).get(step_name, {})
+        return step.get('retry_count', 0) < max_retries
+
+    def clear(self):
+        self._state = {
+            'version': 1,
+            'created_at': time.time(),
+            'steps': {}
+        }
+        self._save()
+
+
+# ============================================================
+# 三步方案辅助函数：数据转换（P0修复3-5共享）
+# ============================================================
+
+VULGAR_WORD_MAP = {
+    '装逼': '犀利点评',
+    '傻逼': '令人费解',
+    '他妈的': '真性情',
+    '逼味': '独特风格',
+    '傻X': '争议观点',
+    '脑残': '出人意料',
+    '弱智': '令人困惑',
+}
+
+
+def _validate_step1_segments(topics: List[Dict], srt_text: str) -> List[Dict]:
+    for topic in topics:
+        topic.setdefault('removed_sections', [])
+    return _validate_segments_with_srt(topics, srt_text)
+
+
+def _merge_scores_to_topics(topics: List[Dict], scores: List[Dict]) -> List[Dict]:
+    score_map = {s.get('id'): s for s in scores}
+    for topic in topics:
+        tid = topic.get('id', '')
+        score_data = score_map.get(tid, {})
+        topic['final_score'] = score_data.get('final_score', 0.5)
+        topic['sub_scores'] = score_data.get('sub_scores', {})
+        topic['recommend_reason'] = score_data.get('recommend_reason',
+                                                    topic.get('outline', '')[:20])
+    return topics
+
+
+def _merge_titles_to_topics(topics: List[Dict], titles: List[Dict]) -> List[Dict]:
+    title_map = {t.get('id'): t.get('title', '') for t in titles}
+    for topic in topics:
+        tid = topic.get('id', '')
+        title = title_map.get(tid, '')
+        if title:
+            title = _postprocess_title(title, topic)
+            topic['title'] = title
+        else:
+            topic['title'] = topic.get('outline', '未命名片段')[:20]
+    return topics
+
+
+def _postprocess_title(title: str, topic: Dict) -> str:
+    for vulgar, replacement in VULGAR_WORD_MAP.items():
+        title = title.replace(vulgar, replacement)
+
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', title))
+    if chinese_chars < 8:
+        outline = topic.get('outline', '')
+        title = title + '：' + outline[:15]
+    elif chinese_chars > 20:
+        chinese_positions = [i for i, c in enumerate(title) if '\u4e00' <= c <= '\u9fff']
+        if len(chinese_positions) > 20:
+            cut_pos = chinese_positions[19] + 1
+            for punct in '，。！？…~':
+                punct_pos = title[:cut_pos].rfind(punct)
+                if punct_pos > 0:
+                    cut_pos = punct_pos + 1
+                    break
+            title = title[:cut_pos]
+    return title
+
+
+def _convert_topics_to_clips(topics: List[Dict]) -> List[Dict]:
+    clips = []
+    for topic in topics:
+        segments = topic.get('segments', [])
+        if not segments:
+            continue
+        clip = {
+            'id': topic.get('id', ''),
+            'outline': topic.get('outline', ''),
+            'generated_title': topic.get('title', topic.get('outline', '')),
+            'start_time': segments[0]['start'],
+            'end_time': segments[-1]['end'],
+            'final_score': topic.get('final_score', 0.5),
+            'recommend_reason': topic.get('recommend_reason', ''),
+            'content': [],
+            '_segments': segments,
+            '_removed_sections': topic.get('removed_sections', [])
+        }
+        clips.append(clip)
+    return clips
+
+
 class FunClipStyleProcessor:
     """基于FunClip风格的单步LLM处理方案"""
     
@@ -794,6 +1339,7 @@ class FunClipStyleProcessor:
             processing_mode: 处理模式
                 - "two_stage": 两阶段方案（默认，先识别边界再生成标题）
                 - "merged": 合并方案（单次LLM调用完成所有任务）
+                - "three_step": 三步方案（边界识别→评分→标题，含检查点与降级）
         """
         logger.info("="*60)
         logger.info(f"使用FunClip风格处理开始 [模式: {processing_mode}]")
@@ -827,6 +1373,8 @@ class FunClipStyleProcessor:
         
         if processing_mode == "merged":
             return self._llm_process_merged(srt_text)
+        elif processing_mode == "three_step":
+            return self._llm_process_three_step(srt_text)
         else:
             return self._llm_process_with_llm(srt_text)
     
@@ -1010,7 +1558,383 @@ class FunClipStyleProcessor:
         except Exception as e:
             logger.warning(f"合并方案LLM处理失败: {e}，使用降级方案")
             return self._fallback_process(srt_text)
-    
+
+    def _prepare_enhanced_text(self, srt_text: str) -> str:
+        cleaned_srt = _clean_filler_words(srt_text)
+        try:
+            from backend.pipeline.topic_precluster import TopicPreCluster
+            precluster = TopicPreCluster()
+            report = precluster.process(srt_text)
+            if report.clusters:
+                logger.info(f"预聚类完成: {report.stats}")
+                return report.enhanced_text
+        except Exception as e:
+            logger.warning(f"预聚类失败: {e}")
+        return cleaned_srt
+
+    def _extract_srt_for_topic(self, segments: List[Dict], srt_entries: List[Dict]) -> str:
+        if not segments or not srt_entries:
+            return ""
+        seg_start = _srt_time_to_seconds(segments[0]['start'])
+        seg_end = _srt_time_to_seconds(segments[-1]['end'])
+        relevant = [e for e in srt_entries if e['end'] >= seg_start and e['start'] <= seg_end]
+        lines = []
+        for i, entry in enumerate(relevant):
+            lines.append(f"{entry['start_str']} --> {entry['end_str']}")
+            lines.append(entry['text'])
+            if i < len(relevant) - 1:
+                lines.append("")
+        return '\n'.join(lines)
+
+    def _prepare_step2_input(self, topics: List[Dict], srt_entries: List[Dict]) -> List[Dict]:
+        topics_with_srt = []
+        for topic in topics:
+            segments = topic.get('segments', [])
+            if not segments:
+                continue
+            srt_text = self._extract_srt_for_topic(segments, srt_entries)
+            if len(srt_text) > 2000:
+                srt_lines = srt_text.split('\n')
+                head_lines = srt_lines[:80]
+                tail_lines = srt_lines[-30:]
+                srt_text = '\n'.join(head_lines) + '\n...(中间省略)...\n' + '\n'.join(tail_lines)
+                logger.info(f"话题{topic['id']} SRT过长({len(srt_lines)}条)，截取首{len(head_lines)}+尾{len(tail_lines)}条")
+
+            total_duration = sum(
+                _srt_time_to_seconds(seg['end']) - _srt_time_to_seconds(seg['start'])
+                for seg in segments
+            )
+
+            topics_with_srt.append({
+                'id': topic.get('id', ''),
+                'outline': topic.get('outline', ''),
+                'topic_type': topic.get('topic_type', 'daily'),
+                'total_duration_seconds': round(total_duration, 1),
+                'srt_text': srt_text
+            })
+
+        return topics_with_srt
+
+    def _prepare_step3_input(self, topics: List[Dict]) -> List[Dict]:
+        srt_entries = None
+        topics_data = []
+        for topic in topics:
+            segments = topic.get('segments', [])
+            srt_text = ""
+            if segments and srt_entries is None:
+                srt_entries = []
+            if segments:
+                srt_text = "SRT文本未提取"
+
+            topics_data.append({
+                'id': topic.get('id', ''),
+                'outline': topic.get('outline', ''),
+                'topic_type': topic.get('topic_type', 'daily'),
+                'recommend_reason': topic.get('recommend_reason', ''),
+                'srt_text': srt_text
+            })
+        return topics_data
+
+    def _call_step1_boundary(self, srt_text: str) -> Optional[List[Dict]]:
+        try:
+            response = self.llm_manager.current_provider.call(
+                FUNCLIP_STEP1_BOUNDARY_PROMPT,
+                "这是待分析的直播srt字幕：\n" + srt_text,
+                max_tokens=4096,
+                temperature=0.1
+            )
+
+            if not response or not response.content:
+                return None
+
+            debug_path = self.metadata_dir / "step1_raw_response.txt"
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(response.content)
+
+            return self._parse_step1_response(response.content)
+
+        except Exception as e:
+            logger.error(f"Step 1 调用异常: {e}")
+            return None
+
+    def _parse_step1_response(self, response_text: str) -> Optional[List[Dict]]:
+        def _try_parse(json_str):
+            try:
+                data = json.loads(re.sub(r',\s*([\]}])', r'\1', json_str))
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict) and 'topics' in data:
+                    return data['topics']
+            except json.JSONDecodeError:
+                pass
+            return None
+
+        result = _try_parse(response_text)
+        if result is not None:
+            return result
+
+        for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response_text):
+            result = _try_parse(block)
+            if result is not None:
+                return result
+
+        match = re.search(r'\[[\s\S]*"segments"[\s\S]*\]', response_text)
+        if match:
+            result = _try_parse(match.group())
+            if result is not None:
+                return result
+
+        logger.warning(f"无法解析 Step 1 响应: {response_text[:300]}")
+        return None
+
+    def _do_step1_with_retry(self, srt_text: str, srt_entries: List[Dict],
+                              checkpoint: 'PipelineCheckpoint') -> Optional[List[Dict]]:
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                enhanced_text = self._prepare_enhanced_text(srt_text)
+                step1_topics = self._call_step1_boundary(enhanced_text)
+                if step1_topics is not None:
+                    return step1_topics
+                logger.warning(f"Step 1 第{attempt+1}次调用解析失败")
+                checkpoint.mark_step_failed('step1_boundary', 'JSON解析失败')
+            except Exception as e:
+                logger.error(f"Step 1 第{attempt+1}次调用异常: {e}")
+                checkpoint.mark_step_failed('step1_boundary', str(e))
+            if attempt < max_retries:
+                logger.info(f"Step 1 重试 ({attempt+1}/{max_retries})...")
+        return None
+
+    def _call_step2_batch_score(self, topics_with_srt: List[Dict]) -> List[Dict]:
+        if not topics_with_srt:
+            return []
+
+        if _should_batch_step2(topics_with_srt):
+            logger.info(
+                f"Step 2 输入 token 超阈值，启动分批评分 "
+                f"(共 {len(topics_with_srt)} 个话题)"
+            )
+            batch1, batch2 = _split_topics_by_priority(topics_with_srt)
+            logger.info(f"  批次1(高优先): {len(batch1)} 个话题")
+            logger.info(f"  批次2(低优先): {len(batch2)} 个话题")
+            all_scores = []
+            if batch1:
+                scores1 = self._do_step2_call(batch1, batch_label="批次1")
+                all_scores.extend(scores1)
+            if batch2:
+                scores2 = self._do_step2_call(batch2, batch_label="批次2")
+                all_scores.extend(scores2)
+            logger.info(f"分批评分完成，共 {len(all_scores)} 个分数")
+            return all_scores
+        else:
+            return self._do_step2_call(topics_with_srt, batch_label="单批")
+
+    def _do_step2_call(self, topics_with_srt: List[Dict], batch_label: str = "") -> List[Dict]:
+        try:
+            input_json = json.dumps(topics_with_srt, ensure_ascii=False, indent=2)
+            logger.info(f"Step 2 [{batch_label}] LLM调用: {len(topics_with_srt)} 个话题, "
+                        f"输入长度 {len(input_json)} 字符, 预估 {_estimate_tokens(input_json)} tokens")
+
+            response = self.llm_manager.current_provider.call(
+                FUNCLIP_STEP2_BATCH_SCORE_PROMPT,
+                "以下是待评分的话题数据：\n" + input_json,
+                max_tokens=2048,
+                temperature=0.2
+            )
+
+            if not response or not response.content:
+                logger.warning(f"Step 2 [{batch_label}] 返回空响应")
+                return []
+
+            result = self._parse_step2_response(response.content)
+            logger.info(f"Step 2 [{batch_label}] 解析成功: {len(result)} 个分数")
+            return result
+
+        except Exception as e:
+            logger.error(f"Step 2 [{batch_label}] 调用失败: {e}")
+            return []
+
+    def _parse_step2_response(self, response_text: str) -> List[Dict]:
+        def _try_parse(json_str):
+            try:
+                data = json.loads(re.sub(r',\s*([\]}])', r'\1', json_str))
+                if isinstance(data, dict) and 'scores' in data:
+                    return data['scores']
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+            return None
+
+        result = _try_parse(response_text)
+        if result is not None:
+            return result
+
+        for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response_text):
+            result = _try_parse(block)
+            if result is not None:
+                return result
+
+        for pattern in [r'\{[\s\S]*"scores"[\s\S]*\}', r'\[[\s\S]*"final_score"[\s\S]*\]']:
+            match = re.search(pattern, response_text)
+            if match:
+                result = _try_parse(match.group())
+                if result is not None:
+                    return result
+
+        logger.warning(f"无法解析 Step 2 响应: {response_text[:300]}")
+        return []
+
+    def _call_step3_batch_title(self, topics_data: List[Dict]) -> List[Dict]:
+        try:
+            input_json = json.dumps(topics_data, ensure_ascii=False, indent=2)
+            response = self.llm_manager.current_provider.call(
+                FUNCLIP_STEP3_BATCH_TITLE_PROMPT,
+                "以下是待生成标题的话题列表：\n" + input_json,
+                max_tokens=2048,
+                temperature=0.3
+            )
+
+            if not response or not response.content:
+                return []
+
+            return self._parse_step3_response(response.content)
+
+        except Exception as e:
+            logger.error(f"Step 3 调用异常: {e}")
+            return []
+
+    def _parse_step3_response(self, response_text: str) -> List[Dict]:
+        def _try_parse(json_str):
+            try:
+                data = json.loads(re.sub(r',\s*([\]}])', r'\1', json_str))
+                if isinstance(data, dict) and 'titles' in data:
+                    return data['titles']
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+            return None
+
+        result = _try_parse(response_text)
+        if result is not None:
+            return result
+
+        for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response_text):
+            result = _try_parse(block)
+            if result is not None:
+                return result
+
+        match = re.search(r'\{[\s\S]*"titles"[\s\S]*\}', response_text)
+        if match:
+            result = _try_parse(match.group())
+            if result is not None:
+                return result
+
+        logger.warning(f"无法解析 Step 3 响应: {response_text[:300]}")
+        return []
+
+    def _llm_process_three_step(self, srt_text: str):
+        """三步流水线处理：边界识别 → 批量评分 → 批量标题（带检查点与降级）"""
+        try:
+            checkpoint = PipelineCheckpoint(self.metadata_dir)
+
+            # ==========================================
+            # Step 1: 边界识别（带检查点 + 空输出降级）
+            # ==========================================
+            step1_topics = checkpoint.get_step_output('step1_boundary')
+
+            if step1_topics is None:
+                logger.info("Step 1 检查点未命中，开始执行...")
+                srt_entries = _parse_srt_timeline(srt_text)
+                step1_topics = self._do_step1_with_retry(srt_text, srt_entries, checkpoint)
+
+                if step1_topics is None:
+                    logger.warning("Step 1 重试耗尽，降级到 _fallback_process")
+                    checkpoint.clear()
+                    return self._fallback_process(srt_text)
+
+            if not step1_topics:
+                logger.warning("Step 1 输出为空数组（LLM判断无独立话题），降级")
+                checkpoint.clear()
+                srt_entries = _parse_srt_timeline(srt_text)
+                if srt_entries:
+                    step1_topics = [{
+                        'id': '1',
+                        'outline': '完整内容',
+                        'segments': [{
+                            'start': srt_entries[0]['start_str'],
+                            'end': srt_entries[-1]['end_str']
+                        }],
+                        'topic_type': 'daily'
+                    }]
+                    logger.info("已构造默认单话题")
+                else:
+                    return self._fallback_process(srt_text)
+
+            step1_topics = _validate_step1_segments(step1_topics, srt_text)
+            checkpoint.save_step_output('step1_boundary', step1_topics,
+                                         {'topic_count': len(step1_topics)})
+
+            srt_entries = _parse_srt_timeline(srt_text)
+
+            # ==========================================
+            # Step 2: 批量评分（带检查点 + boundary_suggestion）
+            # ==========================================
+            step2_scores = checkpoint.get_step_output('step2_scores')
+            if step2_scores is None:
+                logger.info("Step 2 检查点未命中，开始执行...")
+                step2_input = self._prepare_step2_input(step1_topics, srt_entries)
+                step2_scores = self._call_step2_batch_score(step2_input)
+
+                if step2_scores:
+                    step1_topics = _apply_boundary_suggestions(
+                        step1_topics, step2_scores, srt_entries
+                    )
+                    checkpoint.save_step_output('step2_scores', step2_scores,
+                                                 {'score_count': len(step2_scores)})
+                else:
+                    checkpoint.mark_step_failed('step2_scores', 'Step 2 返回空')
+                    logger.warning("Step 2 评分失败，将使用默认评分继续")
+
+            step1_topics = _merge_scores_to_topics(step1_topics, step2_scores or [])
+
+            # ==========================================
+            # Step 3: 批量标题（带检查点）
+            # ==========================================
+            step3_titles = checkpoint.get_step_output('step3_titles')
+            if step3_titles is None:
+                logger.info("Step 3 检查点未命中，开始执行...")
+                step3_input = self._prepare_step3_input(step1_topics)
+                step3_titles = self._call_step3_batch_title(step3_input)
+
+                if step3_titles:
+                    checkpoint.save_step_output('step3_titles', step3_titles,
+                                                 {'title_count': len(step3_titles)})
+
+            step1_topics = _merge_titles_to_topics(step1_topics, step3_titles or [])
+
+            # ==========================================
+            # 最终后处理：排序 → Top 6 → 按时间升序
+            # ==========================================
+            step1_topics.sort(key=lambda t: t.get('final_score', 0), reverse=True)
+            step1_topics = step1_topics[:6]
+            step1_topics.sort(key=lambda t: _srt_time_to_seconds(t['segments'][0]['start']))
+            for i, topic in enumerate(step1_topics):
+                topic['id'] = str(i + 1)
+
+            clips = _convert_topics_to_clips(step1_topics)
+            collections = self._generate_collections(clips)
+
+            checkpoint.clear()
+
+            logger.info(f"三步流水线完成: {len(clips)} 个片段")
+            return clips, collections
+
+        except Exception as e:
+            logger.warning(f"三步流水线处理失败: {e}，使用降级方案")
+            return self._fallback_process(srt_text)
+
     def _parse_merged_response(self, response_text: str) -> List[Dict]:
         """解析合并方案LLM返回的数据"""
         merged_clips = []
@@ -1430,36 +2354,41 @@ def run_funclip_pipeline(srt_path: Path,
         logger.info(f"    评分: {clip.get('final_score', 0)}")
     logger.info("=" * 60)
 
-    # Silero VAD 音频级静音检测（检测SRT条目内部的长停顿）
+    # 复用 FunASR 的 fsmn-vad 结果检测静音（无需独立运行 Silero VAD）
     vad_silence_all = []
     try:
-        if video_path and video_path.exists():
-            import librosa, tempfile, os, soundfile as sf
-            logger.info(f"VAD: 从视频提取音频分析静音...")
-            y, sr = librosa.load(str(video_path), sr=16000, mono=True)
-            logger.info(f"VAD: 音频提取完成 ({len(y)/sr:.1f}s)")
-            tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            tmp_wav_path = tmp_wav.name
-            tmp_wav.close()
-            sf.write(tmp_wav_path, y, sr)
-            vad_silence_all = _detect_vad_silence_in_audio(tmp_wav_path)
-            os.unlink(tmp_wav_path)
+        if srt_path and srt_path.exists():
+            vad_path = Path(str(srt_path).replace('.srt', '.vad.json'))
+            if vad_path.exists():
+                import json
+                speech_segs = json.load(open(vad_path, encoding='utf-8'))
+                logger.info(f"复用 FunASR VAD 数据: {len(speech_segs)} 段语音")
+                duration = speech_segs[-1]['end'] if speech_segs else 0.0
+                prev_end = 0.0
+                for seg in speech_segs:
+                    if seg['start'] - prev_end >= 2.0:
+                        vad_silence_all.append((prev_end, seg['start']))
+                    prev_end = seg['end']
+                if duration - prev_end >= 2.0:
+                    vad_silence_all.append((prev_end, duration))
+                logger.info(f"从 VAD 数据推导出 {len(vad_silence_all)} 段静音(>=2s)")
 
-            if vad_silence_all:
-                # 为每个clip筛选其segment范围内的静音
-                vad_count = 0
-                for clip in clips:
-                    segments = clip.get('_segments', [])
-                    if not segments:
-                        continue
-                    clip_vad = _filter_vad_silence_by_segments(
-                        vad_silence_all, segments
-                    )
-                    if clip_vad:
-                        existing = clip.setdefault('_removed_sections', [])
-                        existing.extend(clip_vad)
-                        vad_count += len(clip_vad)
-                logger.info(f"VAD静音检测完成: 共添加 {vad_count} 段音频级静音到各片段")
+                if vad_silence_all:
+                    vad_count = 0
+                    for clip in clips:
+                        segments = clip.get('_segments', [])
+                        if not segments:
+                            continue
+                        clip_vad = _filter_vad_silence_by_segments(
+                            vad_silence_all, segments
+                        )
+                        if clip_vad:
+                            existing = clip.setdefault('_removed_sections', [])
+                            existing.extend(clip_vad)
+                            vad_count += len(clip_vad)
+                    logger.info(f"VAD静音检测完成: 共添加 {vad_count} 段音频级静音到各片段")
+            else:
+                logger.info("VAD 数据文件不存在，跳过音频级静音检测")
     except Exception as e:
         logger.warning(f"VAD静音检测跳过: {e}")
 

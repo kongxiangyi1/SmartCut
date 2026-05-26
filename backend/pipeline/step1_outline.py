@@ -212,7 +212,13 @@ class OutlineExtractor:
         
         if current_outline:
             outlines.append(current_outline)
-        
+
+        # 限制话题数量，防止过度碎片化
+        MAX_TOPICS = 8
+        if len(outlines) > MAX_TOPICS:
+            logger.warning(f"LLM返回了{len(outlines)}个话题，超过上限{MAX_TOPICS}，截取前{MAX_TOPICS}个")
+            outlines = outlines[:MAX_TOPICS]
+
         return outlines
     
     def _merge_outlines(self, outlines: List[Dict], overlap_threshold: float = 0.6) -> List[Dict]:
