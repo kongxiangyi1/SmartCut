@@ -1,7 +1,7 @@
 """
 合集模型
 """
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Table, JSON
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Table, JSON, Integer
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -22,7 +22,8 @@ clip_collection = Table(
     "clip_collection",
     BaseModel.metadata,
     Column("clip_id", String(36), ForeignKey("clips.id", ondelete="CASCADE"), primary_key=True),
-    Column("collection_id", String(36), ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True)
+    Column("collection_id", String(36), ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True),
+    Column("order_index", Integer, default=0)
 )
 
 

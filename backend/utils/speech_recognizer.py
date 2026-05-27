@@ -194,6 +194,7 @@ class SpeechRecognitionConfig:
     enable_speaker_diarization: bool = False  # 是否启用说话人分离
     enable_fallback: bool = True  # 是否启用回退机制
     fallback_method: SpeechRecognitionMethod = SpeechRecognitionMethod.WHISPER_LOCAL  # 回退方法
+    hotwords: str = ""  # 热词列表（空格分隔），帮助ASR准确识别特定词汇
     
     def __post_init__(self):
         """验证配置参数"""
@@ -214,7 +215,7 @@ class SpeechRecognitionConfig:
         # 自动调整模型（当 model 为默认值 "base" 时，根据方法选择正确的默认模型）
         if self.model == "base":
             if self.method == SpeechRecognitionMethod.FUNASR:
-                self.model = "paraformer-zh"
+                self.model = "iic/SenseVoiceSmall"
             elif self.method == SpeechRecognitionMethod.WHISPER_LOCAL:
                 self.model = "small"
             # 其他方法使用默认的 "base"（bcut-asr 等不需要 model 参数）
@@ -225,7 +226,7 @@ class SpeechRecognitionConfig:
             if self.model not in valid_models:
                 raise ValueError(f"不支持的Whisper模型: {self.model}")
         elif self.method == SpeechRecognitionMethod.FUNASR:
-            valid_models = ["paraformer-zh", "paraformer-en", "paraformer-zh-16k", "euro", "fa", "ms", "asr", "ct-punc", "fsmn-vad"]
+            valid_models = ["iic/SenseVoiceSmall", "paraformer-zh", "paraformer-en", "paraformer-zh-16k", "euro", "fa", "ms", "asr", "ct-punc", "fsmn-vad"]
             if self.model not in valid_models:
                 raise ValueError(f"不支持的FunASR模型: {self.model}")
         # bcut-asr 和其他云服务不需要验证 model 参数
@@ -395,6 +396,7 @@ class SpeechRecognizer:
                 '-acodec', 'pcm_s16le',  # 使用PCM 16位编码
                 '-ar', '16000',  # 采样率16kHz
                 '-ac', '1',  # 单声道
+                '-af', 'afftdn=nf=-25,volume=2.0',  # 降噪+自动增益
                 '-y',  # 覆盖输出文件
                 str(audio_path)
             ]
@@ -684,6 +686,103 @@ class SpeechRecognizer:
             logger.error(error_msg)
             raise SpeechRecognitionError(error_msg)
     
+    # ---------- ASR热词管理 ----------
+    
+    def _collect_asr_hotwords(self, config: 'SpeechRecognitionConfig') -> str:
+        """收集所有来源的热词（多源合并去重）"""
+        hotword_list = []
+        
+        # 来源1：用户配置
+        if config.hotwords:
+            hotword_list.extend(config.hotwords.strip().split())
+        
+        # 来源2：环境变量
+        env_hw = os.environ.get("FUNASR_HOTWORDS", "").strip()
+        if env_hw:
+            hotword_list.extend(env_hw.split())
+        
+        # 来源3：历史积累的热词（自动学习）
+        persisted = self._load_asr_hotwords()
+        hotword_list.extend(persisted)
+        
+        # 去重保序
+        seen = set()
+        result = []
+        for w in hotword_list:
+            w = w.strip()
+            if w and w not in seen and len(w) >= 2:
+                seen.add(w)
+                result.append(w)
+        
+        return " ".join(result)
+    
+    def _load_asr_hotwords(self) -> list:
+        """加载历史积累的热词"""
+        path = Path.home() / ".cache" / "autoclip" / "asr_hotwords.json"
+        if path.exists():
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"加载历史热词失败: {e}")
+        return []
+    
+    def _save_asr_hotwords(self, srt_path: Path):
+        """从ASR结果提取高频词，积累到热词库"""
+        try:
+            if not srt_path.exists():
+                return
+            
+            # 解析SRT文件提取文本
+            texts = []
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if (line and not line.isdigit() 
+                        and '-->' not in line 
+                        and len(line) >= 2):
+                        texts.append(line)
+            
+            all_text = ' '.join(texts)
+            
+            # 提取2字以上的中文词，统计频率
+            import re
+            words = re.findall(r'[\u4e00-\u9fff]{2,}', all_text)
+            from collections import Counter
+            counter = Counter(words)
+            
+            # 停用词
+            stopwords = {'的', '是', '在', '了', '和', '与', '了', '我', '你', '他', 
+                        '这', '那', '我们', '你们', '他们', '这个', '那个', 
+                        '什么', '怎么', '为什么', '因为', '所以', '但是', 
+                        '而且', '然后', '还是', '就是', '也是',
+                        '啊', '吧', '呢', '吗', '呀', '哦', '嗯',
+                        '大家', '可以', '没有', '不是', '一个', '有没',
+                        '就是', '还是', '只是', '但是', '因为', '所以'}
+            
+            # 提取出现3次以上的高频词作为热词
+            new_hotwords = [
+                word for word, count in counter.most_common(50) 
+                if count >= 3 and word not in stopwords and len(word) >= 2
+            ]
+            
+            if not new_hotwords:
+                return
+            
+            # 合并到现有热词库
+            existing = self._load_asr_hotwords()
+            merged = list(set(existing + new_hotwords))
+            
+            # 保存（只保留最近200个）
+            cache_dir = Path.home() / ".cache" / "autoclip"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(cache_dir / "asr_hotwords.json", 'w', encoding='utf-8') as f:
+                json.dump(merged[:200], f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"热词库已更新: {len(merged)} 个热词")
+        except Exception as e:
+            logger.warning(f"保存热词失败: {e}")
+    
     def _generate_subtitle_funasr(self, video_path: Path, output_path: Path,
                                    config: SpeechRecognitionConfig) -> Path:
         """使用FunASR生成字幕（支持GPU加速和模型量化）"""
@@ -722,11 +821,11 @@ class SpeechRecognizer:
                 logger.info(f"初始化FunASR模型（首次加载，{cache_key}）...")
                 
                 model_kwargs = {
-                    "model": "paraformer-zh",
+                    "model": "iic/SenseVoiceSmall",
                     "vad_model": "fsmn-vad",
                     "punc_model": "ct-punc",
                     "device": device,
-                    "disable_update": True,  # 禁用更新检查
+                    "disable_update": True,
                     "cache_dir": str(Path.home() / ".cache" / "funasr"),
                 }
                 
@@ -747,7 +846,13 @@ class SpeechRecognizer:
 
             logger.info("开始FunASR转录...")
             # 设置return_timestamp=True以获取带时间戳的分段结果
-            result = model.generate(input=str(audio_path), return_timestamp=True)
+            # 收集热词：用户配置 + 环境变量 + 历史积累
+            generate_kwargs = {"input": str(audio_path), "return_timestamp": True}
+            hotwords = self._collect_asr_hotwords(config)
+            if hotwords:
+                generate_kwargs["hotword"] = hotwords
+                logger.info(f"FunASR热词: {hotwords[:100]}...")
+            result = model.generate(**generate_kwargs)
 
             logger.info(f"转录完成，生成SRT: {output_path}")
             
@@ -869,6 +974,10 @@ class SpeechRecognizer:
                                 segment_index += 1
 
             logger.info(f"[OK] FunASR字幕生成成功: {output_path}")
+            
+            # 从SRT提取高频词，自动积累热词库（供下次ASR使用）
+            self._save_asr_hotwords(output_path)
+            
             return output_path
 
         except SpeechRecognitionError:
@@ -986,7 +1095,7 @@ def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = 
         effective_method = SpeechRecognitionMethod(method)
 
     if effective_method == SpeechRecognitionMethod.FUNASR:
-        default_model = "paraformer-zh"
+        default_model = "iic/SenseVoiceSmall"
     elif effective_method == SpeechRecognitionMethod.WHISPER_LOCAL:
         default_model = "small"
     else:

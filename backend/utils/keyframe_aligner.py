@@ -16,6 +16,7 @@ import subprocess
 import logging
 import json
 import re
+import functools
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
@@ -118,10 +119,17 @@ class KeyframeAligner:
         if not self._initialized:
             self._initialize()
     
-    def _find_ffprobe_path(self) -> str:
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _find_ffprobe_path() -> str:
         """查找 ffprobe 可执行文件路径"""
         import shutil
         import os
+        
+        # 0. 环境变量优先（用户可设置 FFPROBE_PATH 跳过 PATH 搜索）
+        env_path = os.environ.get('FFPROBE_PATH')
+        if env_path and os.path.exists(env_path):
+            return env_path
         
         # 1. 尝试系统 PATH 中的 ffprobe
         ffprobe_path = shutil.which('ffprobe')
