@@ -31,16 +31,27 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
       setLoadingCategories(true)
       try {
         const response = await projectApi.getVideoCategories()
-        setCategories(response.categories)
+        // 安全地获取categories，兼容不同的响应格式
+        const cats = response.categories || response.data || []
+        setCategories(cats)
         // 设置默认选中【默认】选项
         if (response.default_category) {
           setSelectedCategory(response.default_category)
-        } else if (response.categories.length > 0) {
-          setSelectedCategory(response.categories[0].value)
+        } else if (cats.length > 0) {
+          setSelectedCategory(cats[0].value)
         }
       } catch (error) {
         console.error('Failed to load video categories:', error)
-        message.error('加载视频分类失败')
+        // 提供一个默认分类列表，即使API失败也能工作
+        const defaultCategories = [
+          { value: 'default', name: '默认', description: '通用视频内容', icon: '[VIDEO]', color: '#4facfe' },
+          { value: 'knowledge', name: '知识科普', description: '教育、科普、技术分享', icon: '[DOC]', color: '#52c41a' },
+          { value: 'business', name: '商业财经', description: '商业分析、财经资讯', icon: '💼', color: '#faad14' },
+          { value: 'entertainment', name: '娱乐内容', description: '娱乐节目、综艺表演', icon: '🎪', color: '#fa8c16' }
+        ]
+        setCategories(defaultCategories)
+        setSelectedCategory('default')
+        message.warning('使用默认分类列表')
       } finally {
         setLoadingCategories(false)
       }

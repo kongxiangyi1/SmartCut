@@ -115,3 +115,40 @@ coverage.xml
 offline_packages/
 *.pt
 dump.rdb
+
+# PID files
+*.pid
+autoclip_ports.json
+
+# Test and debug files
+check_*.py
+test_*.py
+debug_*.py
+diagnose_*.py
+verify_*.py
+add_*.py
+delete_*.py
+restore_*.py
+sync_*.py
+trigger_*.py
+update_*.py
+fix_*.py
+manual_*.py
+simple_*.py
+sql_*.py
+list_*.py
+run_*.py
+trigger_*.py
+tmp_*.txt
+NUL
+_test_*.py
+
+# Test output directories
+test_output/
+test_verify_output/
+
+# Temporary scripts
+scripts/test_*.py
+
+# Work files
+docs/Atest.txt

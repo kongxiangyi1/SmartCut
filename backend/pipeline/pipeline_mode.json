@@ -1,0 +1,6 @@
+{
+  "_comment": "管道模式配置文件 - 合并模式merged, 独立模式independent",
+  "mode": "funclip",
+  "funclip_sub_mode": "merged",
+  "ab_test_ratio": 0.1
+}

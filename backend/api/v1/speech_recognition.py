@@ -12,6 +12,10 @@ from backend.utils.speech_recognizer import (
     get_available_speech_recognition_methods,
     get_supported_languages,
     get_whisper_models,
+    get_funasr_load_progress,
+    is_funasr_loaded,
+    is_funasr_loading,
+    wait_for_funasr,
     SpeechRecognitionConfig,
     SpeechRecognitionMethod,
     LanguageCode
@@ -163,6 +167,24 @@ async def get_install_guide(method: str = Query(..., description="语音识别�
                 "首次使用时会自动下载模型文件"
             ]
         },
+        "whisper_faster": {
+            "title": "faster-whisper安装指南（推荐）",
+            "description": "安装faster-whisper高性能语音识别工具",
+            "steps": [
+                "1. 安装Python依赖: pip install faster-whisper",
+                "2. 安装系统依赖:",
+                "   - Ubuntu/Debian: sudo apt install ffmpeg",
+                "   - macOS: brew install ffmpeg",
+                "   - Windows: winget install ffmpeg",
+                "3. 可选：安装CUDA支持以获得更好的GPU性能"
+            ],
+            "notes": [
+                "faster-whisper是标准Whisper的4-10倍速度升级版",
+                "内存占用减少50%+",
+                "支持CPU INT8量化和GPU float16加速",
+                "准确率与标准Whisper相同或更高"
+            ]
+        },
         "openai_api": {
             "title": "OpenAI API配置指南",
             "description": "配置OpenAI API语音识别",
@@ -232,3 +254,55 @@ async def get_install_guide(method: str = Query(..., description="语音识别�
         raise HTTPException(status_code=400, detail=f"不支持的语音识别方法: {method}")
     
     return guides[method]
+
+
+# ==================== 模型加载状态查询接口 ====================
+
+
+class ModelLoadProgress(BaseModel):
+    """模型加载进度"""
+    status: str  # "not_loaded" | "loading" | "loaded"
+    elapsed: float  # 已加载时间(秒)
+    estimated: float  # 预估剩余时间(秒)
+    is_loaded: bool
+    is_loading: bool
+
+
+@router.get("/model-load-progress", response_model=ModelLoadProgress)
+async def get_model_load_progress():
+    """获取FunASR模型加载进度"""
+    try:
+        load_status = get_funasr_load_progress()
+        return ModelLoadProgress(
+            status=load_status["status"],
+            elapsed=load_status["elapsed"],
+            estimated=load_status["estimated"],
+            is_loaded=is_funasr_loaded(),
+            is_loading=is_funasr_loading()
+        )
+    except Exception as e:
+        logger.error(f"获取模型加载进度失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取模型加载进度失败: {e}")
+
+
+@router.post("/wait-for-model")
+async def wait_for_model_loading(timeout: int = Query(300, description="超时时间(秒)")):
+    """等待FunASR模型加载完成
+    
+    Args:
+        timeout: 超时时间(秒)，默认300秒
+    
+    Returns:
+        加载结果
+    """
+    try:
+        success = wait_for_funasr(timeout=timeout)
+        
+        return {
+            "success": success,
+            "message": "模型加载完成" if success else "模型加载超时",
+            "is_loaded": is_funasr_loaded()
+        }
+    except Exception as e:
+        logger.error(f"等待模型加载失败: {e}")
+        raise HTTPException(status_code=500, detail=f"等待模型加载失败: {e}")

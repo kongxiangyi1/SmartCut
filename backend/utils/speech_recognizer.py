@@ -8,7 +8,9 @@ import json
 import os
 import asyncio
 import shutil
-from typing import Optional, List, Dict, Any, Union
+import threading
+import time
+from typing import Optional, List, Dict, Any, Union, Callable
 from pathlib import Path
 from enum import Enum
 import requests
@@ -18,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 # FunASR模型缓存（按设备类型缓存）
 _FUNASR_MODEL_CACHE = {}
+# 模型加载状态跟踪
+_FUNASR_LOADING = False
+_FUNASR_LOAD_COMPLETE = threading.Event()
+_FUNASR_LOAD_START_TIME = None
 
 def _detect_compute_device() -> str:
     """
@@ -143,6 +149,8 @@ class SpeechRecognitionMethod(str, Enum):
     """语音识别方法枚举"""
     BCUT_ASR = "bcut_asr"
     WHISPER_LOCAL = "whisper_local"
+    WHISPER_FASTER = "whisper_faster"
+    WHISPER_PARALLEL = "whisper_parallel"  # 🆕 并行识别
     FUNASR = "funasr"
     OPENAI_API = "openai_api"
     AZURE_SPEECH = "azure_speech"
@@ -263,6 +271,12 @@ class SpeechRecognizer:
         # 检查bcut-asr（优先级次之，云服务但准确率高）
         methods[SpeechRecognitionMethod.BCUT_ASR] = self._check_bcut_asr_availability()
         
+        # 检查faster-whisper（高优先级，速度快，内存占用低）
+        methods[SpeechRecognitionMethod.WHISPER_FASTER] = self._check_faster_whisper_availability()
+        
+        # 检查并行识别（优先级次之，性能最高）
+        methods[SpeechRecognitionMethod.WHISPER_PARALLEL] = self._check_parallel_whisper_availability()
+        
         # 检查本地Whisper（优先级较低，需要安装较大模型）
         methods[SpeechRecognitionMethod.WHISPER_LOCAL] = self._check_whisper_availability()
         
@@ -283,7 +297,7 @@ class SpeechRecognizer:
         if available:
             logger.info(f"可用语音识别方法（按优先级）: {', '.join(available)}")
         else:
-            logger.warning("没有可用的语音识别方法，请安装 FunASR、Whisper 或配置 API 密钥")
+            logger.warning("没有可用的语音识别方法，请安装 FunASR、faster-whisper、Whisper 或配置 API 密钥")
         
         return methods
     
@@ -320,6 +334,29 @@ class SpeechRecognizer:
                 # Whisper 不可用，但这是正常的，不算严重问题
                 logger.debug("本地Whisper未安装（可选）")
                 return False
+    
+    def _check_faster_whisper_availability(self) -> bool:
+        """检查faster-whisper是否可用"""
+        try:
+            # 导入faster-whisper
+            import faster_whisper
+            logger.info("[OK] faster-whisper已安装")
+            return True
+        except ImportError:
+            logger.debug("faster-whisper未安装（可选）")
+            return False
+    
+    def _check_parallel_whisper_availability(self) -> bool:
+        """检查并行识别是否可用（依赖faster-whisper）"""
+        try:
+            import faster_whisper
+            # 检查concurrent.futures（Python标准库，应该有）
+            from concurrent.futures import ProcessPoolExecutor
+            logger.info("[OK] 并行识别依赖已就绪")
+            return True
+        except ImportError:
+            logger.debug("并行识别依赖不全（可选）")
+            return False
     
     def _check_funasr_availability(self) -> bool:
         """检查FunASR是否可用"""
@@ -447,6 +484,10 @@ class SpeechRecognizer:
         try:
             if config.method == SpeechRecognitionMethod.BCUT_ASR:
                 return self._generate_subtitle_bcut_asr(video_path, output_path, config)
+            elif config.method == SpeechRecognitionMethod.WHISPER_PARALLEL:
+                return self._generate_subtitle_parallel(video_path, output_path, config)
+            elif config.method == SpeechRecognitionMethod.WHISPER_FASTER:
+                return self._generate_subtitle_faster_whisper(video_path, output_path, config)
             elif config.method == SpeechRecognitionMethod.WHISPER_LOCAL:
                 return self._generate_subtitle_whisper_local(video_path, output_path, config)
             elif config.method == SpeechRecognitionMethod.FUNASR:
@@ -686,6 +727,163 @@ class SpeechRecognizer:
             logger.error(error_msg)
             raise SpeechRecognitionError(error_msg)
     
+    def _generate_subtitle_faster_whisper(self, video_path: Path, output_path: Path,
+                                         config: SpeechRecognitionConfig) -> Path:
+        """使用faster-whisper生成字幕（高速，低内存占用）"""
+        if not self.available_methods[SpeechRecognitionMethod.WHISPER_FASTER]:
+            raise SpeechRecognitionError(
+                "faster-whisper不可用，请安装: pip install faster-whisper\n"
+                "同时确保已安装ffmpeg:\n"
+                "  macOS: brew install ffmpeg\n"
+                "  Ubuntu: sudo apt install ffmpeg\n"
+                "  Windows: winget install ffmpeg"
+            )
+        
+        try:
+            logger.info(f"开始使用faster-whisper生成字幕: {video_path}")
+            
+            if not video_path.exists():
+                raise SpeechRecognitionError(f"视频文件不存在: {video_path}")
+            
+            file_size = video_path.stat().st_size
+            if file_size == 0:
+                raise SpeechRecognitionError(f"视频文件为空: {video_path}")
+            
+            import faster_whisper
+            logger.info(f"加载faster-whisper模型: {config.model}")
+            
+            device = _detect_compute_device()
+            logger.info(f"使用计算设备: {device}")
+            
+            # faster-whisper 支持 INT8 量化（默认启用）
+            model = faster_whisper.WhisperModel(
+                config.model, 
+                device=device,
+                compute_type="int8" if device == "cpu" else "float16",
+                cpu_threads=os.cpu_count() or 4,
+            )
+            
+            logger.info("开始faster-whisper转录...")
+            
+            transcribe_kwargs = {"language": None}
+            if config.language != LanguageCode.AUTO:
+                transcribe_kwargs["language"] = config.language.value
+            
+            segments, info = model.transcribe(
+                str(video_path), 
+                **transcribe_kwargs,
+                word_timestamps=True,
+                vad_filter=True,
+            )
+            
+            logger.info(f"检测到语言: {info.language} (概率: {info.language_probability:.2%})")
+            
+            logger.info(f"转录完成，生成SRT: {output_path}")
+            
+            def format_time(seconds):
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                secs = seconds % 60
+                return f"{hours:02}:{minutes:02}:{secs:06.3f}".replace('.', ',')
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for i, segment in enumerate(segments, start=1):
+                    f.write(f"{i}\n")
+                    f.write(f"{format_time(segment.start)} --> {format_time(segment.end)}\n")
+                    f.write(f"{segment.text.strip()}\n\n")
+            
+            logger.info(f"[OK] faster-whisper字幕生成成功: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            error_msg = f"faster-whisper生成字幕时发生错误: {e}"
+            logger.error(error_msg)
+            raise SpeechRecognitionError(error_msg)
+    
+    def _generate_subtitle_parallel(self, video_path: Path, output_path: Path,
+                                    config: SpeechRecognitionConfig) -> Path:
+        """
+        使用多进程并行生成字幕（性能最高）
+        
+        特点:
+        - 2-4倍速度提升（取决于CPU核数）
+        - 内存占用增加（可通过进程数控制）
+        - 基于 faster-whisper + VAD分段
+        """
+        if not self.available_methods[SpeechRecognitionMethod.WHISPER_PARALLEL]:
+            # 回退到普通faster-whisper
+            logger.warning("并行识别不可用，回退到faster-whisper")
+            return self._generate_subtitle_faster_whisper(video_path, output_path, config)
+        
+        try:
+            logger.info(f"开始并行识别: {video_path}")
+            
+            # 提取音频
+            audio_path = self._extract_audio_from_video(video_path, output_path.parent)
+            
+            # 导入并行模块
+            from .parallel_transcriber import (
+                ParallelTranscriber,
+                ParallelStrategy,
+                TranscriptionResult
+            )
+            
+            # 初始化并行识别器（自动根据CPU核数和内存配置最优进程数）
+            transcriber = ParallelTranscriber(
+                model_name=config.model,
+                max_workers=None,  # 自动配置
+                strategy=ParallelStrategy.VAD_SEGMENT,
+                language=config.language.value if config.language != LanguageCode.AUTO else None
+            )
+            
+            # 执行识别
+            results = transcriber.transcribe(audio_path)
+            
+            # 生成SRT
+            logger.info("生成字幕文件...")
+            
+            def format_time(seconds):
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                secs = seconds % 60
+                return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace('.', ',')
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                index = 1
+                for res in results:
+                    if not res.text.strip():
+                        continue
+                    
+                    f.write(f"{index}\n")
+                    f.write(f"{format_time(res.start)} --> {format_time(res.end)}\n")
+                    f.write(f"{res.text.strip()}\n\n")
+                    index += 1
+            
+            logger.info(f"[OK] 并行字幕生成成功: {output_path}")
+            
+            # 保存热词（可选）
+            self._save_asr_hotwords(output_path)
+            
+            return output_path
+            
+        except Exception as e:
+            error_msg = f"并行识别失败: {e}"
+            logger.error(error_msg)
+            logger.debug(traceback.format_exc())
+            
+            # 回退策略
+            if config.enable_fallback and config.fallback_method != SpeechRecognitionMethod.WHISPER_PARALLEL:
+                logger.warning("并行识别失败，尝试回退到其他方法")
+                fallback_config = SpeechRecognitionConfig(
+                    method=config.fallback_method,
+                    language=config.language,
+                    model=config.model,
+                    enable_fallback=False
+                )
+                return self.generate_subtitle(video_path, output_path, fallback_config)
+            
+            raise SpeechRecognitionError(error_msg)
+    
     # ---------- ASR热词管理 ----------
     
     def _collect_asr_hotwords(self, config: 'SpeechRecognitionConfig') -> str:
@@ -800,6 +998,61 @@ class SpeechRecognizer:
             file_size = video_path.stat().st_size
             if file_size == 0:
                 raise SpeechRecognitionError(f"视频文件为空: {video_path}")
+
+            # ==================== 智能等待和降级策略 ====================
+            
+            # 检查FunASR加载状态
+            if not is_funasr_loaded():
+                load_status = get_funasr_load_progress()
+                
+                if load_status["status"] == "loading":
+                    # 正在加载 - 等待
+                    logger.info(f"[智能等待] FunASR正在加载中，已用时: {load_status['elapsed']:.1f}秒，"
+                               f"预估剩余: {load_status['estimated']:.1f}秒")
+                    
+                    # 等待加载完成（最多300秒）
+                    def log_progress(progress):
+                        logger.info(f"[加载进度] 已用时: {progress['elapsed']:.1f}秒，"
+                                   f"预估剩余: {progress['estimated']:.1f}秒")
+                    
+                    success = wait_for_funasr(timeout=300, progress_callback=log_progress)
+                    
+                    if success:
+                        logger.info("[智能等待] FunASR加载完成，继续处理")
+                    else:
+                        # 等待超时 - 降级到更快的方案
+                        logger.warning("[智能降级] FunASR加载超时，尝试使用 faster-whisper")
+                        if self.available_methods.get(SpeechRecognitionMethod.WHISPER_FASTER, False):
+                            # 创建降级配置
+                            fallback_config = SpeechRecognitionConfig(
+                                method=SpeechRecognitionMethod.WHISPER_FASTER,
+                                language=config.language,
+                                model=config.model,
+                                timeout=config.timeout,
+                                output_format=config.output_format
+                            )
+                            return self._generate_subtitle_faster_whisper(
+                                video_path, output_path, fallback_config
+                            )
+                        else:
+                            # 连faster-whisper也没有 - 尝试标准whisper
+                            logger.warning("[智能降级] 尝试使用标准Whisper")
+                            fallback_config = SpeechRecognitionConfig(
+                                method=SpeechRecognitionMethod.WHISPER_LOCAL,
+                                language=config.language,
+                                model=config.model,
+                                timeout=config.timeout,
+                                output_format=config.output_format
+                            )
+                            return self._generate_subtitle_whisper_local(
+                                video_path, output_path, fallback_config
+                            )
+                elif load_status["status"] == "not_loaded":
+                    # 未开始加载 - 直接开始加载
+                    logger.info("[智能加载] FunASR未加载，立即开始加载...")
+                    # 继续正常流程，会自动加载模型
+            
+            # ==================== 正常识别流程 ====================
 
             audio_path = self._extract_audio_from_video(video_path, output_path.parent)
 
@@ -1078,7 +1331,7 @@ def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = 
     Args:
         video_path: 视频文件路径
         output_path: 输出字幕文件路径
-        method: 生成方法 ("auto", "funasr", "bcut_asr", "whisper_local", "openai_api", "azure_speech", "google_speech", "aliyun_speech")
+        method: 生成方法 ("auto", "funasr", "bcut_asr", "whisper_local", "whisper_faster", "openai_api", ...)
         language: 语言代码
         model: 模型名称（FunASR用paraformer-zh，Whisper用small等）
         enable_fallback: 是否启用回退机制
@@ -1096,7 +1349,7 @@ def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = 
 
     if effective_method == SpeechRecognitionMethod.FUNASR:
         default_model = "iic/SenseVoiceSmall"
-    elif effective_method == SpeechRecognitionMethod.WHISPER_LOCAL:
+    elif effective_method in [SpeechRecognitionMethod.WHISPER_LOCAL, SpeechRecognitionMethod.WHISPER_FASTER]:
         default_model = "small"
     else:
         default_model = model
@@ -1117,15 +1370,18 @@ def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = 
         # 自动选择最佳方法
         available_methods = recognizer.get_available_methods()
         
-        # 按优先级选择方法（FunASR优先，因为准确率高且完全离线）
+        # 按优先级选择方法
+        # 优先级：准确率优先（FunASR） > 速度优先（并行识别） > 其他
         priority_methods = [
-            SpeechRecognitionMethod.FUNASR,
-            SpeechRecognitionMethod.BCUT_ASR,
-            SpeechRecognitionMethod.WHISPER_LOCAL,
-            SpeechRecognitionMethod.OPENAI_API,
-            SpeechRecognitionMethod.AZURE_SPEECH,
-            SpeechRecognitionMethod.GOOGLE_SPEECH,
-            SpeechRecognitionMethod.ALIYUN_SPEECH
+            SpeechRecognitionMethod.FUNASR,                    # 1. 中文准确率最高
+            SpeechRecognitionMethod.BCUT_ASR,                  # 2. 云服务，准确率高
+            SpeechRecognitionMethod.WHISPER_PARALLEL,          # 3. 速度最快（2-4x）
+            SpeechRecognitionMethod.WHISPER_FASTER,            # 4. 速度较快
+            SpeechRecognitionMethod.WHISPER_LOCAL,             # 5. 标准Whisper
+            SpeechRecognitionMethod.OPENAI_API,               # 6. OpenAI API
+            SpeechRecognitionMethod.AZURE_SPEECH,              # 7. Azure
+            SpeechRecognitionMethod.GOOGLE_SPEECH,             # 8. Google
+            SpeechRecognitionMethod.ALIYUN_SPEECH              # 9. 阿里云
         ]
         
         for priority_method in priority_methods:
@@ -1133,7 +1389,7 @@ def generate_subtitle_for_video(video_path: Path, output_path: Optional[Path] = 
                 config.method = priority_method
                 break
         else:
-            raise SpeechRecognitionError("没有可用的语音识别服务，请安装whisper或配置API密钥")
+            raise SpeechRecognitionError("没有可用的语音识别服务，请安装whisper/faster-whisper/funasr或配置API密钥")
     
     return recognizer.generate_subtitle(video_path, output_path, config)
 
@@ -1172,3 +1428,106 @@ def get_whisper_models() -> List[str]:
         Whisper模型列表
     """
     return ["tiny", "base", "small", "medium", "large"]
+
+
+# ==================== 模型加载状态跟踪 ====================
+
+def _mark_funasr_loading_start():
+    """标记FunASR开始加载"""
+    global _FUNASR_LOADING, _FUNASR_LOAD_START_TIME
+    _FUNASR_LOADING = True
+    _FUNASR_LOAD_START_TIME = time.time()
+    logger.info("[模型加载] FunASR 开始加载")
+
+
+def _mark_funasr_loading_complete():
+    """标记FunASR加载完成"""
+    global _FUNASR_LOADING
+    _FUNASR_LOADING = False
+    _FUNASR_LOAD_COMPLETE.set()
+    elapsed = time.time() - _FUNASR_LOAD_START_TIME if _FUNASR_LOAD_START_TIME else 0
+    logger.info(f"[模型加载] FunASR 加载完成，耗时: {elapsed:.2f}秒")
+
+
+def is_funasr_loaded() -> bool:
+    """检查FunASR是否已加载完成"""
+    return _FUNASR_LOAD_COMPLETE.is_set() or len(_FUNASR_MODEL_CACHE) > 0
+
+
+def is_funasr_loading() -> bool:
+    """检查FunASR是否正在加载中"""
+    return _FUNASR_LOADING
+
+
+def get_funasr_load_progress() -> Dict[str, Any]:
+    """
+    获取FunASR加载进度状态
+    
+    Returns:
+        {
+            status: "not_loaded" | "loading" | "loaded",
+            elapsed: 已加载时间(秒),
+            estimated: 预估剩余时间(秒)
+        }
+    """
+    if is_funasr_loaded():
+        return {
+            "status": "loaded",
+            "elapsed": time.time() - _FUNASR_LOAD_START_TIME if _FUNASR_LOAD_START_TIME else 0,
+            "estimated": 0
+        }
+    elif is_funasr_loading():
+        elapsed = time.time() - _FUNASR_LOAD_START_TIME if _FUNASR_LOAD_START_TIME else 0
+        # 预估剩余时间（假设总时长约120-180秒）
+        estimated = max(0, 150 - elapsed) if elapsed < 150 else 0
+        return {
+            "status": "loading",
+            "elapsed": elapsed,
+            "estimated": estimated
+        }
+    else:
+        return {
+            "status": "not_loaded",
+            "elapsed": 0,
+            "estimated": 150
+        }
+
+
+def wait_for_funasr(timeout: float = 300, 
+                     progress_callback: Optional[Callable] = None) -> bool:
+    """
+    等待FunASR加载完成
+    
+    Args:
+        timeout: 超时时间(秒)
+        progress_callback: 进度回调函数
+    
+    Returns:
+        是否加载成功
+    """
+    if is_funasr_loaded():
+        return True
+    
+    if not is_funasr_loading():
+        logger.warning("FunASR未开始加载，不等待")
+        return False
+    
+    logger.info(f"等待FunASR加载，超时: {timeout}秒")
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        if is_funasr_loaded():
+            return True
+        
+        if progress_callback:
+            try:
+                progress = get_funasr_load_progress()
+                progress_callback(progress)
+            except Exception as e:
+                logger.debug(f"进度回调失败: {e}")
+        
+        time.sleep(1)  # 每秒检查一次
+    
+    logger.warning(f"等待FunASR超时 ({timeout}秒)")
+    return False

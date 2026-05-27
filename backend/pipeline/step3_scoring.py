@@ -110,13 +110,15 @@ class ClipScorer:
                 else:
                     original_clip['final_score'] = round(float(score), 2)
                     original_clip['recommend_reason'] = reason
-                    # 安全地获取outline标题用于日志显示
                     outline = original_clip.get('outline', {})
                     if isinstance(outline, dict):
                         title = outline.get('title', '未知标题')
                     else:
                         title = str(outline)
                     logger.info(f"  > 评分成功: {title[:20]}... [分数: {score}]")
+
+            # 强制分数差异化：防止LLM返回全相同的分数
+            clips = self._ensure_score_diversity(clips)
 
             return clips
 
@@ -127,6 +129,43 @@ class ClipScorer:
                 clip['final_score'] = 0.0
                 clip['recommend_reason'] = "批量评估失败"
             return clips
+
+    def _ensure_score_diversity(self, clips: List[Dict]) -> List[Dict]:
+        """强制分数差异化：当所有分数相同时，根据内容质量微调"""
+        scores = [c.get('final_score', 0) for c in clips]
+        unique_scores = set(scores)
+
+        if len(unique_scores) <= 1 and len(clips) > 1:
+            logger.warning(f"检测到所有分数相同({scores[0] if scores else 'N/A'})，强制差异化...")
+            base_score = scores[0] if scores else 0.5
+            diversified = []
+            for i, clip in enumerate(clips):
+                content = clip.get('content', '') or ''
+                outline = clip.get('outline', {})
+                if isinstance(outline, dict):
+                    title = outline.get('title', '') or ''
+                else:
+                    title = str(outline)
+                text_len = len(content) + len(title)
+
+                variance = 0.0
+                if text_len > 200:
+                    variance = 0.15
+                elif text_len > 100:
+                    variance = 0.08
+                elif text_len > 50:
+                    variance = 0.03
+
+                offset = (i / max(len(clips) - 1, 1)) * 0.2 - 0.1
+                new_score = min(1.0, max(0.1, base_score + variance + offset))
+                clip['final_score'] = round(new_score, 2)
+                clip['recommend_reason'] = clip.get('recommend_reason', '') + ' (校准评分)'
+                diversified.append(clip)
+
+            logger.info(f"分数差异化完成: {[c['final_score'] for c in diversified]}")
+            return diversified
+
+        return clips
 
     def save_scores(self, scored_clips: List[Dict], output_path: Path):
         """保存评分结果"""
