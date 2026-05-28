@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     processing_max_retries: int = Field(default=3, validation_alias=AliasChoices('PROCESSING_MAX_RETRIES'))
     log_level: str = Field(default='INFO', validation_alias=AliasChoices('LOG_LEVEL'))
     log_format: str = Field(default='%(asctime)s - %(name)s - %(levelname)s - %(message)s', validation_alias=AliasChoices('LOG_FORMAT'))
-    log_file: str = Field(default='backend.log', validation_alias=AliasChoices('LOG_FILE'))
+    log_file: str = Field(default='logs/backend.log', validation_alias=AliasChoices('LOG_FILE'))
 
 # 全局配置实例
 settings = Settings()

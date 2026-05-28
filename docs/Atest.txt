@@ -1,6 +1,9 @@
 查看后端日志：
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
+实时监控日志（类似 tail -f）
+Get-Content "e:\ClipProject\autoclip-main1\autoclip-main\backend.log" -Tail 50 -Wait
+
 启动前端：
 cd fronted 
 npm run dev

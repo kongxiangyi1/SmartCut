@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>检查dayjs时间显示</title>
+</head>
+<body>
+    <h1>Dayjs时间显示测试</h1>
+    
+    <div id="output"></div>
+
+    <script src="https://unpkg.com/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/locale/zh-cn.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/plugin/relativeTime.js"></script>
+
+    <script>
+        dayjs.locale('zh-cn');
+        dayjs.extend(dayjs_plugin_relativeTime);
+
+        const output = document.getElementById('output');
+        
+        // 测试不同的时间
+        const testTimes = [
+            new Date(), // 现在
+            new Date(Date.now() - 6 * 60 * 1000), // 6分钟前
+            new Date(Date.now() - 60 * 60 * 1000), // 1小时前
+            new Date(Date.now() - 2 * 60 * 60 * 1000), // 2小时前
+            new Date(Date.now() - 8 * 60 * 60 * 1000), // 8小时前
+            new Date(Date.now() - 1 * 24 * 60 * 60 * 1000), // 1天前
+        ];
+        
+        let html = '<h2>测试不同时间的显示:</h2>';
+        html += '<ul>';
+        
+        for (const time of testTimes) {
+            const timeStr = time.toLocaleString();
+            const relative = dayjs(time).fromNow();
+            
+            html += `<li><strong>${timeStr}</strong> -> <span style="color: blue; font-size: 1.2em;">${relative}</span></li>`;
+        }
+        
+        html += '</ul>';
+        
+        // 测试数据库中的时间
+        html += '<h2>模拟数据库中项目的时间:</h2>';
+        html += '<ul>';
+        const dbTimes = [
+            '2026-05-16T17:47:42.742812',
+            '2026-05-16T17:47:16.198639',
+            '2026-05-14T21:12:42.198704',
+        ];
+        
+        for (const timeStr of dbTimes) {
+            const time = new Date(timeStr);
+            const relative = dayjs(time).fromNow();
+            
+            html += `<li><strong>${timeStr}</strong> -> <span style="color: green; font-size: 1.2em;">${relative}</span></li>`;
+        }
+        
+        html += '</ul>';
+        
+        output.innerHTML = html;
+    </script>
+</body>
+</html>

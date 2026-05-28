@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Dayjs时间显示测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        h1 { color: #333; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <h1>Dayjs时间显示测试</h1>
+    
+    <div id="test-results"></div>
+
+    <!-- 引入 dayjs -->
+    <script src="https://unpkg.com/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/locale/zh-cn.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/plugin/relativeTime.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/plugin/timezone.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/plugin/utc.js"></script>
+
+    <script>
+        // 配置dayjs
+        dayjs.extend(dayjs_plugin_relativeTime);
+        dayjs.extend(dayjs_plugin_timezone);
+        dayjs.extend(dayjs_plugin_utc);
+        dayjs.locale('zh-cn');
+        dayjs.tz.setDefault('Asia/Shanghai');
+        
+        const container = document.getElementById('test-results');
+        
+        // 测试各种情况
+        let html = '<h2>测试当前时间: ' + new Date().toLocaleString('zh-CN') + '</h2>';
+        
+        html += '<h3>测试不同时间点的显示</h3>';
+        html += '<table>';
+        html += '<tr><th>时间</th><th>格式</th><th>fromNow()结果</th></tr>';
+        
+        // 测试当前时间之前的几个时间点
+        const testDates = [
+            new Date(Date.now() - 1000 * 60 * 5),      // 5分钟前
+            new Date(Date.now() - 1000 * 60 * 60),    // 1小时前
+            new Date(Date.now() - 1000 * 60 * 60 * 2),// 2小时前
+            new Date(Date.now() - 1000 * 60 * 60 * 8),// 8小时前
+            new Date(Date.now() - 1000 * 60 * 60 * 24),// 1天前
+        ];
+        
+        testDates.forEach(date => {
+            html += '<tr>';
+            html += `<td>${date.toLocaleString('zh-CN')}</td>`;
+            html += `<td>${date.toISOString()}</td>`;
+            html += `<td><strong style="color: blue; font-size: 1.2em;">${dayjs(date).tz('Asia/Shanghai').fromNow()}</strong></td>`;
+            html += '</tr>';
+        });
+        
+        html += '</table>';
+        
+        html += '<h3>测试项目中的时间</h3>';
+        html += '<table>';
+        html += '<tr><th>原始时间</th><th>格式化时间</th><th>fromNow()</th></tr>';
+        
+        const projectTimes = [
+            '2026-05-16 17:47:42.742812',
+            '2026-05-14T21:12:42.198704',
+            '2026-05-16 20:09:06.677155',
+        ];
+        
+        projectTimes.forEach(timeStr => {
+            // 处理不同的时间格式
+            let date;
+            if (timeStr.includes('T')) {
+                date = new Date(timeStr);
+            } else {
+                // 处理类似 '2026-05-16 17:47:42.742812' 的格式
+                const parts = timeStr.split(' ');
+                date = new Date(`${parts[0]}T${parts[1]}`);
+            }
+            
+            html += '<tr>';
+            html += `<td>${timeStr}</td>`;
+            html += `<td>${date.toLocaleString('zh-CN')}</td>`;
+            html += `<td><strong style="color: green; font-size: 1.2em;">${dayjs(date).tz('Asia/Shanghai').fromNow()}</strong></td>`;
+            html += '</tr>';
+        });
+        
+        html += '</table>';
+        
+        // 查看本地时区
+        html += '<h3>浏览器信息</h3>';
+        html += '<ul>';
+        html += `<li>浏览器时区: ${Intl.DateTimeFormat().resolvedOptions().timeZone}</li>`;
+        html += `<li>本地时间: ${new Date().toString()}</li>`;
+        html += `<li>本地时间 (ISO): ${new Date().toISOString()}</li>`;
+        html += '</ul>';
+        
+        container.innerHTML = html;
+    </script>
+</body>
+</html>

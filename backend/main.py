@@ -34,10 +34,18 @@ logging_config = get_logging_config()
 
 # 配置控制台编码处理（解决Windows GBK编码问题）
 import sys
+import io
+import os
 if sys.platform == "win32":
-    import io
+    # 包装stdout/stderr为UTF-8编码
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# 确保日志目录存在（相对于项目根目录）
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+log_file_path = os.path.join(project_root, logging_config["file"])
+log_dir = os.path.dirname(log_file_path)
+os.makedirs(log_dir, exist_ok=True)
 
 # 配置日志格式
 log_format = logging_config["format"]
@@ -48,16 +56,18 @@ root_logger = logging.getLogger()
 root_logger.setLevel(getattr(logging, logging_config["level"]))
 root_logger.handlers.clear()
 
-# 创建控制台处理器（Windows下强制UTF-8编码）
-console_handler = logging.StreamHandler(sys.stdout)
+# 创建控制台处理器（Windows下使用UTF-8编码的stream）
+if sys.platform == "win32":
+    # Windows系统使用包装后的UTF-8 stream
+    console_handler = logging.StreamHandler(stream=sys.stdout)
+else:
+    console_handler = logging.StreamHandler()
 console_handler.setLevel(getattr(logging, logging_config["level"]))
 console_handler.setFormatter(formatter)
-if sys.platform == "win32":
-    console_handler.encoding = 'utf-8'
 root_logger.addHandler(console_handler)
 
 # 创建文件处理器（强制UTF-8编码）
-file_handler = logging.FileHandler(logging_config["file"], encoding='utf-8')
+file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
 file_handler.setLevel(getattr(logging, logging_config["level"]))
 file_handler.setFormatter(formatter)
 root_logger.addHandler(file_handler)
