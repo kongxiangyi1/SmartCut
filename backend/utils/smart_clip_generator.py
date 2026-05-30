@@ -248,9 +248,10 @@ class SmartClipGenerator:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
+        duration = max(0.1, end - start)
         cmd = [
             'ffmpeg', '-y', '-i', video_path,
-            '-ss', str(start), '-to', str(end),
+            '-ss', str(start), '-t', str(duration),
             '-c', 'copy', str(output_path)
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')

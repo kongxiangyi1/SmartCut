@@ -94,13 +94,50 @@ class LLMProvider(ABC):
                 return str(next(iter(input_data.values())))
             return json.dumps(input_data, ensure_ascii=False, indent=2)
         return str(input_data)
-    
+
+    def _resolve_prompt(self, prompt: str, input_data: Any = None) -> tuple:
+        """
+        解析 Prompt 占位符。
+
+        Returns:
+            (resolved_prompt, content_embedded)
+        """
+        formatted = self._format_input_data(input_data)
+        if formatted and '{content}' in prompt:
+            return prompt.replace('{content}', formatted), True
+        return prompt, False
+
     def _build_full_input(self, prompt: str, input_data: Any = None) -> str:
         """构建完整的输入"""
+        resolved, content_embedded = self._resolve_prompt(prompt, input_data)
+        if content_embedded:
+            return resolved
+
         formatted = self._format_input_data(input_data)
         if formatted:
-            return f"{prompt}\n\n输入内容：\n{formatted}"
-        return prompt
+            return f"{resolved}\n\n输入内容：\n{formatted}"
+
+        if '{content}' in resolved:
+            return resolved.replace('{content}', '')
+        return resolved
+
+    def _build_chat_messages(self, prompt: str, input_data: Any = None) -> List[Dict[str, str]]:
+        """构建 chat 模型的 messages，支持 {content} 占位符"""
+        resolved, content_embedded = self._resolve_prompt(prompt, input_data)
+        if content_embedded:
+            return [{"role": "user", "content": resolved}]
+
+        formatted = self._format_input_data(input_data)
+        clean_prompt = resolved.replace('{content}', '').rstrip()
+        if formatted:
+            if clean_prompt:
+                return [
+                    {"role": "system", "content": clean_prompt},
+                    {"role": "user", "content": formatted},
+                ]
+            return [{"role": "user", "content": formatted}]
+
+        return [{"role": "user", "content": clean_prompt}]
 
 class DashScopeProvider(LLMProvider):
     """阿里DashScope提供商"""
@@ -201,14 +238,7 @@ class OpenAIProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用OpenAI API"""
         try:
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages = [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content}
-                ]
-            else:
-                messages = [{"role": "user", "content": prompt}]
+            messages = self._build_chat_messages(prompt, input_data)
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -352,14 +382,7 @@ class SiliconFlowProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用硅基流动API（OpenAI兼容接口）"""
         try:
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages = [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content}
-                ]
-            else:
-                messages = [{"role": "user", "content": prompt}]
+            messages = self._build_chat_messages(prompt, input_data)
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -449,14 +472,7 @@ class ZhipuProvider(LLMProvider):
         self._init_client()
         
         try:
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages = [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content}
-                ]
-            else:
-                messages = [{"role": "user", "content": prompt}]
+            messages = self._build_chat_messages(prompt, input_data)
             
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -534,14 +550,7 @@ class TencentProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用腾讯混元API（OpenAI兼容接口）"""
         try:
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages = [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content}
-                ]
-            else:
-                messages = [{"role": "user", "content": prompt}]
+            messages = self._build_chat_messages(prompt, input_data)
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -658,13 +667,7 @@ class OllamaProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用Ollama API（OpenAI兼容接口）"""
         try:
-            messages = [{"role": "system", "content": prompt}]
-
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages.append({"role": "user", "content": user_content})
-            else:
-                messages.append({"role": "user", "content": prompt})
+            messages = self._build_chat_messages(prompt, input_data)
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -781,13 +784,7 @@ class LMStudioProvider(LLMProvider):
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用LM Studio API（OpenAI兼容接口）"""
         try:
-            messages = [{"role": "system", "content": prompt}]
-
-            if input_data is not None:
-                user_content = self._format_input_data(input_data)
-                messages.append({"role": "user", "content": user_content})
-            else:
-                messages.append({"role": "user", "content": prompt})
+            messages = self._build_chat_messages(prompt, input_data)
 
             response = self.client.chat.completions.create(
                 model=self.model_name,

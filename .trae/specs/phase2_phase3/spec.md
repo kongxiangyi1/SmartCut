@@ -28,6 +28,9 @@
 - **FR-4**: 实现上下文边界精化器，验证话题完整性
 - **FR-5**: 扩展配置管理，支持口音、纠错、边界检测配置
 - **FR-6**: 扩展语音识别 API，支持新配置项
+- **FR-7**: 规范化边界修正建议接口，减少自由文本解析依赖
+- **FR-8**: 引入关键帧/停顿/说话人/场景信号作为边界候选参考
+- **FR-9**: 实现 Step1 前文本纠错与语义预处理，减少原始 SRT 错别字和行断句噪声影响
 
 ## Non-Functional Requirements
 - **NFR-1**: 边界检测延迟 < 200ms（单视频）
@@ -79,6 +82,24 @@
 - **Given**: 语音识别 API 已扩展
 - **When**: 调用 /api/v1/speech-recognition/status
 - **Then**: 返回包含新模式、口音、纠错配置的状态信息
+- **Verification**: `programmatic`
+
+### AC-7: 结构化边界建议接口
+- **Given**: LLM 返回话题评分与边界建议
+- **When**: 解析 boundary_suggestion 字段
+- **Then**: 得到结构化调整指令，可直接应用于 segment 边界
+- **Verification**: `programmatic`
+
+### AC-8: 多信号候选边界参考
+- **Given**: 输入字幕、关键帧、停顿、说话人、场景信号
+- **When**: 生成候选边界参考点
+- **Then**: Step1/Step2 分析能使用这些信号进行边界判断
+- **Verification**: `programmatic`
+
+### AC-9: Step1 前语义预处理
+- **Given**: 原始 SRT 字幕文本
+- **When**: 运行文本纠错与语义预处理
+- **Then**: 返回纠错后文本，话题边界分析更稳健，原始语义基本保持不变
 - **Verification**: `programmatic`
 
 ## Open Questions

@@ -96,7 +96,13 @@ PROMPT_FILES = {
     "recommendation": PROMPT_DIR / "推荐理由.txt",
     "title": PROMPT_DIR / "标题生成.txt",
     "clustering": PROMPT_DIR / "主题聚类.txt",
-    "collection_title": PROMPT_DIR / "collection_title.txt"
+    "collection_title": PROMPT_DIR / "collection_title.txt",
+    "funclip_clip_only": PROMPT_DIR / "funclip_clip_only.txt",
+    "funclip_title": PROMPT_DIR / "funclip_title.txt",
+    "funclip_step1_boundary": PROMPT_DIR / "funclip_step1_boundary.txt",
+    "funclip_step2_batch_score": PROMPT_DIR / "funclip_step2_batch_score.txt",
+    "funclip_step3_batch_title": PROMPT_DIR / "funclip_step3_batch_title.txt",
+    "funclip_merged": PROMPT_DIR / "funclip_merged.txt",
 }
 
 # API配置
@@ -121,6 +127,16 @@ TARGET_TOPIC_DURATION_MINUTES = 5  # 话题目标时长（分钟）
 MIN_TOPICS_PER_CHUNK = 3  # 每个文本块最少话题数
 MAX_TOPICS_PER_CHUNK = 8  # 每个文本块最多话题数
 
+# 话题预聚类默认参数
+PRECLUSTER_ENABLED = True
+PRECLUSTER_SIMILARITY_THRESHOLD = 0.15
+PRECLUSTER_MIN_CLUSTER_SIZE = 3
+PRECLUSTER_MIN_MULTI_SEGMENT_SIZE = 2
+PRECLUSTER_TIME_GAP_THRESHOLD = 30.0
+PRECLUSTER_TOP_KEYWORDS = 6
+PRECLUSTER_MAX_CLUSTERS_IN_REPORT = 8
+PRECLUSTER_MAX_ENTRIES_FOR_SIMILARITY = 600
+
 # 滑动窗口配置
 SLIDING_WINDOW = {
     "enabled": True,
@@ -133,6 +149,9 @@ SLIDING_WINDOW = {
 # 确保输出目录存在
 for dir_path in [CLIPS_DIR, COLLECTIONS_DIR, METADATA_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
+
+# 免时长限制的话题类型（这些类型不会因过短或过长被自动过滤/标记）
+NO_DURATION_LIMIT_TYPES = ['product', 'topic']
 
 # 新的配置管理系统
 class Settings(BaseModel):
@@ -150,6 +169,15 @@ class Settings(BaseModel):
     target_topic_duration_minutes: int = 5
     min_topics_per_chunk: int = 3
     max_topics_per_chunk: int = 8
+    # 话题预聚类配置
+    precluster_enabled: bool = True
+    precluster_similarity_threshold: float = 0.15
+    precluster_min_cluster_size: int = 3
+    precluster_min_multi_segment_size: int = 2
+    precluster_time_gap_threshold: float = 30.0
+    precluster_top_keywords: int = 6
+    precluster_max_clusters_in_report: int = 8
+    precluster_max_entries_for_similarity: int = 600
     # 语音识别配置
     speech_recognition_method: str = "whisper_local"
     speech_recognition_language: str = "auto"

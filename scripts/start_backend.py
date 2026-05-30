@@ -25,15 +25,15 @@ def main():
     print(f"项目根目录: {project_root}")
     print(f"后端目录: {backend_dir}")
     print(f"当前工作目录: {os.getcwd()}")
-    print("服务地址: http://localhost:8000")
-    print("API文档: http://localhost:8000/docs")
+    print("服务地址: http://localhost:8090")
+    print("API文档: http://localhost:8090/docs")
     print("按 Ctrl+C 停止服务")
     
     # 启动服务
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8003,  # 修改端口避免与其他服务冲突
+        port=8090,
         reload=True,
         log_level="info"
     )

@@ -6,7 +6,8 @@
 - [x] Checkpoint 3: 多模态边界检测器创建完成，支持加权融合 ✅
 - [x] Checkpoint 4: 上下文边界精化器创建完成，支持话题完整性验证 ✅
 - [x] Checkpoint 5: 集成到时间线定位流程，端到端边界准确率 >= 96% ✅
-
+- [ ] Checkpoint 5.1: 强化 boundary_suggestion 结构化接口完成
+- [ ] Checkpoint 5.2: 引入多信号边界辅助与动态阈值优化完成- [ ] Checkpoint 5.3: Step1 前文本纠错与语义预处理完成
 ## Phase 3: API与配置集成
 - [x] Checkpoint 6: 配置管理扩展完成，支持口音、纠错、边界检测配置 ✅
 - [ ] Checkpoint 7: 语音识别 API 扩展完成，支持新模式和配置项

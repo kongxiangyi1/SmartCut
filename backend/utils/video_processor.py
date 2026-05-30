@@ -144,24 +144,65 @@ class VideoProcessor:
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 转换时间格式：从SRT格式转换为FFmpeg格式
-            ffmpeg_start_time = VideoProcessor.convert_srt_time_to_ffmpeg_time(start_time)
-            ffmpeg_end_time = VideoProcessor.convert_srt_time_to_ffmpeg_time(end_time)
+            # 解析并规范时间为秒数（支持SRT或FFmpeg时间格式）
+            start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                VideoProcessor.convert_srt_time_to_ffmpeg_time(str(start_time))
+            )
+            end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                VideoProcessor.convert_srt_time_to_ffmpeg_time(str(end_time))
+            )
 
-            # 构建帧精确的FFmpeg命令
-            # -ss 在 -i 之后：帧精确定位，解码到精确帧
-            # -to 指定绝对结束时间，替代 -t 相对时长
-            # 重编码（而非 stream copy）：帧精确的前提
+            # 获取视频总时长并对时间进行边界校验和修正
+            video_info = VideoProcessor.get_video_info(input_video)
+            video_duration = None
+            if video_info and 'duration' in video_info:
+                video_duration = float(video_info['duration'])
+
+            # 如果视频时长已知，进行 clamp
+            min_duration = 1.0  # 最小切片时长（秒）
+            if video_duration is not None:
+                # 如果 start 在视频之外，移动到视频尾部留出最小时长
+                if start_sec >= video_duration:
+                    logger.warning(
+                        f"切片开始时间 ({start_sec}) 超出视频总时长 ({video_duration})，将开始时间调整到视频尾部 - {min_duration}s 的位置"
+                    )
+                    start_sec = max(0.0, video_duration - min_duration)
+                    end_sec = video_duration
+
+                # 如果 end 超出视频时长，截断到视频时长
+                if end_sec > video_duration:
+                    logger.warning(
+                        f"切片结束时间 ({end_sec}) 超出视频总时长 ({video_duration})，将结束时间截断到视频总时长"
+                    )
+                    end_sec = video_duration
+
+            # 校验时间合法性：确保 end > start
+            if end_sec <= start_sec + 1e-6:
+                # 如果结束时间不大于开始时间，则扩展到最小持续时间并记录警告
+                logger.warning(
+                    f"切片时间不合法或时长为0 (start={start_time}, end={end_time})，自动扩展到 {min_duration}s"
+                )
+                end_sec = start_sec + min_duration
+
+                # 如果扩展后仍然超出视频总时长，则将区间移动到视频尾部
+                if video_duration is not None and end_sec > video_duration:
+                    start_sec = max(0.0, video_duration - min_duration)
+                    end_sec = video_duration
+
+            duration = end_sec - start_sec
+
+            # 格式化为FFmpeg时间字符串（使用点号作为小数分隔符）
+            ffmpeg_start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_sec)
+            ffmpeg_duration = f"{duration:.3f}"
+
+            # 构建帧精确的FFmpeg命令：使用 -ss AFTER -i 保证帧精确，使用 -t 指定持续时长
+            # 使用流复制以提高短片段的稳定性和速度；如需转码再改回编码参数
             cmd = [
                 'ffmpeg',
                 '-i', str(input_video),
                 '-ss', ffmpeg_start_time,
-                '-to', ffmpeg_end_time,
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-c:a', 'aac',
-                '-b:a', '128k',
+                '-t', ffmpeg_duration,
+                '-c', 'copy',
                 '-y',
                 str(output_path)
             ]
@@ -169,10 +210,10 @@ class VideoProcessor:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
 
             if result.returncode == 0:
-                start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(ffmpeg_start_time)
-                end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(ffmpeg_end_time)
-                duration = end_sec - start_sec
-                logger.info(f"成功提取视频片段: {output_path} ({ffmpeg_start_time} -> {ffmpeg_end_time}, 时长: {duration:.2f}秒)")
+                ffmpeg_end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_sec)
+                logger.info(
+                    f"成功提取视频片段: {output_path} ({ffmpeg_start_time} -> {ffmpeg_end_time}, 时长: {duration:.2f}秒)"
+                )
                 return True
             else:
                 logger.error(f"提取视频片段失败: {result.stderr}")

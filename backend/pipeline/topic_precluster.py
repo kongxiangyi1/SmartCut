@@ -1,7 +1,6 @@
 import re
 import math
 import time
-import random
 import logging
 import unicodedata
 from collections import Counter
@@ -476,9 +475,73 @@ class PreClusterConfig:
     max_entries_for_similarity: int = 600
 
 
+def load_precluster_config() -> PreClusterConfig:
+    """从全局设置加载预聚类配置。"""
+    try:
+        from backend.core.shared_config import config_manager
+
+        settings = config_manager.settings
+        return PreClusterConfig(
+            enabled=settings.precluster_enabled,
+            similarity_threshold=settings.precluster_similarity_threshold,
+            min_cluster_size=settings.precluster_min_cluster_size,
+            min_multi_segment_size=settings.precluster_min_multi_segment_size,
+            time_gap_threshold=settings.precluster_time_gap_threshold,
+            top_keywords=settings.precluster_top_keywords,
+            max_clusters_in_report=settings.precluster_max_clusters_in_report,
+            max_entries_for_similarity=settings.precluster_max_entries_for_similarity,
+        )
+    except Exception:
+        from backend.core.shared_config import (
+            PRECLUSTER_ENABLED,
+            PRECLUSTER_MAX_CLUSTERS_IN_REPORT,
+            PRECLUSTER_MAX_ENTRIES_FOR_SIMILARITY,
+            PRECLUSTER_MIN_CLUSTER_SIZE,
+            PRECLUSTER_MIN_MULTI_SEGMENT_SIZE,
+            PRECLUSTER_SIMILARITY_THRESHOLD,
+            PRECLUSTER_TIME_GAP_THRESHOLD,
+            PRECLUSTER_TOP_KEYWORDS,
+        )
+
+        return PreClusterConfig(
+            enabled=PRECLUSTER_ENABLED,
+            similarity_threshold=PRECLUSTER_SIMILARITY_THRESHOLD,
+            min_cluster_size=PRECLUSTER_MIN_CLUSTER_SIZE,
+            min_multi_segment_size=PRECLUSTER_MIN_MULTI_SEGMENT_SIZE,
+            time_gap_threshold=PRECLUSTER_TIME_GAP_THRESHOLD,
+            top_keywords=PRECLUSTER_TOP_KEYWORDS,
+            max_clusters_in_report=PRECLUSTER_MAX_CLUSTERS_IN_REPORT,
+            max_entries_for_similarity=PRECLUSTER_MAX_ENTRIES_FOR_SIMILARITY,
+        )
+
+
+def deterministic_sample_indices(total: int, sample_size: int) -> List[int]:
+    """按时间轴均匀采样，保证同一输入可复现。"""
+    if total <= sample_size:
+        return list(range(total))
+
+    step = total / sample_size
+    indices: List[int] = []
+    seen = set()
+    for i in range(sample_size):
+        idx = min(int(i * step), total - 1)
+        if idx not in seen:
+            seen.add(idx)
+            indices.append(idx)
+
+    cursor = 0
+    while len(indices) < sample_size and cursor < total:
+        if cursor not in seen:
+            seen.add(cursor)
+            indices.append(cursor)
+        cursor += 1
+
+    return sorted(indices)
+
+
 class TopicPreCluster:
     def __init__(self, config: Optional[PreClusterConfig] = None):
-        self.config = config or PreClusterConfig()
+        self.config = config or load_precluster_config()
         self.parser = SrtEntryParser()
         self.ngram_extractor = NgramExtractor()
         self.ngram_config = NgramConfig(n=0, filter_stopword_only=True)
@@ -531,8 +594,11 @@ class TopicPreCluster:
 
         try:
             if total_entries > self.config.max_entries_for_similarity:
-                sampled_indices = set(random.sample(range(total_entries), self.config.max_entries_for_similarity))
-                entries_for_sim = [entries[i] for i in sorted(sampled_indices)]
+                sampled_indices = deterministic_sample_indices(
+                    total_entries,
+                    self.config.max_entries_for_similarity,
+                )
+                entries_for_sim = [entries[i] for i in sampled_indices]
                 sampled = True
             else:
                 entries_for_sim = entries

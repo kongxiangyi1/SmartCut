@@ -58,8 +58,10 @@ root_logger.handlers.clear()
 
 # 创建控制台处理器（Windows下使用UTF-8编码的stream）
 if sys.platform == "win32":
-    # Windows系统使用包装后的UTF-8 stream
-    console_handler = logging.StreamHandler(stream=sys.stdout)
+    import io
+    console_handler = logging.StreamHandler(stream=io.TextIOWrapper(
+        sys.stdout.buffer, encoding='utf-8', errors='replace'
+    ))
 else:
     console_handler = logging.StreamHandler()
 console_handler.setLevel(getattr(logging, logging_config["level"]))
@@ -342,27 +344,35 @@ async def health_check():
 @app.get("/api/v1/status")
 async def get_status():
     """获取服务状态"""
-    from backend.utils.speech_recognizer import _FUNASR_MODEL_CACHE
-    from backend.utils.speech_recognizer import _WHISPER_MODEL_CACHE
-    
-    funasr_loaded = len(_FUNASR_MODEL_CACHE) > 0
-    whisper_loaded = len(_WHISPER_MODEL_CACHE) > 0
-    
-    return {
-        "service": "AutoClip API",
-        "version": "1.0.0",
-        "models": {
-            "funasr": {
-                "loaded": funasr_loaded,
-                "count": len(_FUNASR_MODEL_CACHE)
+    try:
+        from backend.utils.speech_recognizer import _FUNASR_MODEL_CACHE
+        from backend.utils.speech_recognizer import _WHISPER_MODEL_CACHE
+        
+        funasr_loaded = _FUNASR_MODEL_CACHE is not None and len(_FUNASR_MODEL_CACHE) > 0
+        whisper_loaded = _WHISPER_MODEL_CACHE is not None and len(_WHISPER_MODEL_CACHE) > 0
+        
+        return {
+            "service": "AutoClip API",
+            "version": "1.0.0",
+            "models": {
+                "funasr": {
+                    "loaded": funasr_loaded,
+                    "count": len(_FUNASR_MODEL_CACHE) if _FUNASR_MODEL_CACHE else 0
+                },
+                "whisper": {
+                    "loaded": whisper_loaded,
+                    "count": len(_WHISPER_MODEL_CACHE) if _WHISPER_MODEL_CACHE else 0
+                }
             },
-            "whisper": {
-                "loaded": whisper_loaded,
-                "count": len(_WHISPER_MODEL_CACHE)
-            }
-        },
-        "preload": "background_thread"  # 标识使用后台线程预加载
-    }
+            "preload": "background_thread"
+        }
+    except Exception as e:
+        return {
+            "service": "AutoClip API",
+            "version": "1.0.0",
+            "status": "healthy",
+            "error": f"Model cache check failed: {str(e)}"
+        }
 
 # 延迟导入所有API路由
 from backend.api.v1 import api_router as api_v1_router
@@ -379,7 +389,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="AutoClip API")
     parser.add_argument("--host", default="0.0.0.0", help="主机地址")
-    parser.add_argument("--port", type=int, default=8000, help="端口")
+    parser.add_argument("--port", type=int, default=8090, help="端口")
     parser.add_argument("--reload", action="store_true", help="启用热重载")
     args = parser.parse_args()
     

@@ -85,6 +85,41 @@ backend/
   2. 实现三层纠错机制（规则级/统计级/语义级）
   3. 集成到现有的 text\_processor 中
   4. 添加领域词汇表支持
+  5. 将纠错结果用于 Step1 前语义预处理，生成更符合语义的文本片段
+  6. 结合停顿和说话人信息改善断句，避免原始 SRT 行误导话题边界分析
+  7. 设计 `TextCorrector.correct_text()` 接口，返回 `corrected_text` 和 `corrections` 元数据
+  8. 在 `funclip_style.py` 中修改 Step1 输入流程，使用已纠错、已断句的语义文本
+  9. 保留原始文本备份，在纠错不确定时可回退
+  10. 评估纠错效果，确保常见错别字与同音词处理准确
+
+* **实施计划**：
+  1. Day 1: 定义纠错模块、设计接口与词典结构
+     - 明确 `correct_text()` 返回 `corrected_text`、`corrections`、`confidence`
+     - 建立领域词、同音词、常见错别字映射表
+  2. Day 2: 实现规则级/统计级纠错，并输出纠错元数据
+     - 集成 `pycorrector`
+     - 确保纠错结果保留原始对照信息
+  3. Day 3: 结合说话人和停顿生成语义片段，完成断句逻辑
+     - 实现说话人连续字幕合并
+     - 实现 `pause >= 0.8s` 断句规则
+     - 生成语义片段供 Step1 使用
+  4. Day 4: 修改 Step1 数据流，接入语义预处理结果并保留回退
+     - 修改 `backend/pipeline/funclip_style.py`
+     - 更新 prompt 说明“输入为已预处理文本”
+  5. Day 5: 完成测试、效果验证和性能评估
+     - 编写单元测试和回归测试
+     - 验证 Step1 解析成功率与边界稳定性提升
+
+* **关键实现函数**：
+  - `TextCorrector.correct_text(text: str) -> Tuple[str, List[Dict]]`
+  - `TextCorrector._apply_rule_corrections(text: str) -> str`
+  - `TextCorrector._apply_statistical_corrections(text: str) -> str`
+  - `TextCorrector._validate_semantic_corrections(text: str, original: str) -> str`
+  - `SemanticPreprocessor.generate_semantic_chunks(srt_entries: List[Dict]) -> List[Dict]`
+  - `SemanticPreprocessor._merge_speaker_segments(segments: List[Dict]) -> List[Dict]`
+  - `SemanticPreprocessor._split_by_pause(chunks: List[Dict]) -> List[Dict]`
+  - `FunclipStyle._prepare_step1_input(srt_text: str) -> str`
+  - `FunclipStyle._build_step1_prompt_input(chunks: List[Dict]) -> str`
 
 #### Step 3: 实现口音检测基础功能
 
@@ -165,6 +200,28 @@ backend/
   2. 添加上下文精化步骤
   3. 保留原有的 LLM 分析作为补充
   4. 添加边界质量评分
+
+#### Step 9.1: 强化边界建议结构化接口
+
+* **文件**：`backend/pipeline/funclip_style.py`（修改）
+
+* **内容**：
+
+  1. 将 `boundary_suggestion` 规范为结构化输出字段
+  2. 让边界建议直接映射为 `extend_start` / `shrink_end` / `remove_segment` 等操作
+  3. 降低自由文本解析依赖，提高边界修正稳定性
+  4. 增强 LLM 响应解析与 fallback 逻辑
+
+#### Step 9.2: 引入多信号边界辅助与动态阈值优化
+
+* **文件**：`backend/pipeline/step2_timeline.py`、`backend/pipeline/topic_postprocess.py`（修改）
+
+* **内容**：
+
+  1. 将关键帧、停顿、说话人、场景切换信号提前作为边界候选
+  2. 在 Step1 之前生成候选边界点供 LLM 参考
+  3. 增加动态话题时长与数量阈值策略
+  4. 强化跨段同话题合并规则，增加语义相似度判断
 
 ***
 

@@ -1,0 +1,23 @@
+{
+  "description": "两段语义独立话题：地域文化 + 产品推销",
+  "expected_topic_count_min": 2,
+  "expected_topic_count_max": 3,
+  "topics": [
+    {
+      "label": "地域文化",
+      "keywords": ["地域", "京油子", "顺口溜"],
+      "time_range": {
+        "start": "00:00:01,000",
+        "end": "00:00:16,000"
+      }
+    },
+    {
+      "label": "牛肉丸推销",
+      "keywords": ["牛肉丸", "成分", "九块九"],
+      "time_range": {
+        "start": "00:02:01,000",
+        "end": "00:02:16,000"
+      }
+    }
+  ]
+}

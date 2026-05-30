@@ -17,6 +17,7 @@ from ..utils.text_processor import TextProcessor
 from ..core.shared_config import PROMPT_FILES, METADATA_DIR
 from ..core.llm_manager import LLMManager
 from ..utils.hotword_extractor import HotwordExtractor, SIGNATURE_PATTERNS
+from .topic_postprocess import get_max_topics_per_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,10 @@ class OutlineExtractor:
                     chunk_hotwords
                 )
 
+                chunk_input_text = self._enhance_chunk_with_precluster(chunk_text, chunks[i])
+
                 # 为每个块调用LLM
-                input_data = {"text": chunk_text}
+                input_data = {"text": chunk_input_text}
                 try:
                     response = self.llm_manager.current_provider.call(enhanced_prompt, input_data)
                     llm_content = response.content if response else None
@@ -176,51 +179,6 @@ class OutlineExtractor:
         
         logger.info(f"所有SRT块已保存到: {self.srt_chunks_dir}")
 
-    def _parse_outline_response(self, response: str, chunk_index: int) -> List[Dict]:
-        """
-        解析大模型的大纲响应 (与之前版本保持一致，无质量检查)
-        
-        Args:
-            response: 大模型响应
-            chunk_index: 当前处理的块索引
-            
-        Returns:
-            解析后的大纲结构
-        """
-        outlines = []
-        lines = response.split('\n')
-        current_outline = None
-        
-        for line in lines:
-            line = line.strip()
-            
-            if re.match(r'^\d+\.\s*\*\*', line):
-                if current_outline:
-                    outlines.append(current_outline)
-                
-                topic_name = line.split('**')[1] if '**' in line else line.split('.', 1)[1].strip()
-                current_outline = {
-                    'title': topic_name,
-                    'subtopics': [],
-                    'chunk_index': chunk_index
-                }
-            
-            elif line.startswith('-') and current_outline:
-                subtopic = line[1:].strip()
-                if subtopic and len(subtopic) <= 200:
-                    current_outline['subtopics'].append(subtopic)
-        
-        if current_outline:
-            outlines.append(current_outline)
-
-        # 限制话题数量，防止过度碎片化
-        MAX_TOPICS = 8
-        if len(outlines) > MAX_TOPICS:
-            logger.warning(f"LLM返回了{len(outlines)}个话题，超过上限{MAX_TOPICS}，截取前{MAX_TOPICS}个")
-            outlines = outlines[:MAX_TOPICS]
-
-        return outlines
-    
     def _merge_outlines(self, outlines: List[Dict], overlap_threshold: float = 0.6) -> List[Dict]:
         """
         合并和去重大纲，支持跨窗口去重
@@ -411,6 +369,44 @@ class OutlineExtractor:
 
         return prompt + enhancement
 
+    def _build_chunk_srt_text(self, chunk: Dict) -> str:
+        lines = []
+        for index, entry in enumerate(chunk.get('srt_entries', []), 1):
+            start = entry.get('start_time', '00:00:00,000')
+            end = entry.get('end_time', '00:00:01,000')
+            lines.extend([
+                str(index),
+                f"{start} --> {end}",
+                entry.get('text', ''),
+                '',
+            ])
+        return '\n'.join(lines)
+
+    def _enhance_chunk_with_precluster(self, chunk_text: str, chunk: Dict) -> str:
+        chunk_srt = self._build_chunk_srt_text(chunk)
+        if not chunk_srt.strip():
+            return chunk_text
+
+        try:
+            from backend.pipeline.topic_precluster import TopicPreCluster, load_precluster_config
+            from backend.pipeline.topic_postprocess import extract_precluster_report_text
+
+            report = TopicPreCluster(load_precluster_config()).process(chunk_srt)
+            if not report.clusters:
+                return chunk_text
+
+            report_text = extract_precluster_report_text(report.enhanced_text)
+            logger.info(
+                "块%s 预聚类完成: clusters=%s, coverage=%.0f%%",
+                chunk.get('chunk_index', 0),
+                report.stats.get('total_clusters', 0),
+                report.stats.get('coverage_ratio', 0) * 100,
+            )
+            return f"{report_text}\n\n---\n\n{chunk_text}"
+        except Exception as exc:
+            logger.warning(f"块{chunk.get('chunk_index', 0)} 预聚类失败: {exc}")
+            return chunk_text
+
     def _parse_outline_response(
         self,
         response: str,
@@ -452,6 +448,18 @@ class OutlineExtractor:
 
         if current_outline:
             outlines.append(current_outline)
+
+        max_topics = get_max_topics_per_chunk()
+        if len(outlines) > max_topics:
+            from backend.pipeline.topic_postprocess import (
+                rank_and_truncate_topics,
+                score_outline_quality,
+            )
+            outlines = rank_and_truncate_topics(
+                outlines,
+                max_topics,
+                score_fn=score_outline_quality,
+            )
 
         return outlines
 

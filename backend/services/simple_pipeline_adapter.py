@@ -152,7 +152,7 @@ class SimplePipelineAdapter:
                 generated_srt = generate_subtitle_for_video(
                     video_path=Path(input_video_path),
                     output_path=srt_path,
-                    method="auto",
+                    method="funasr",
                     language="auto"
                 )
                 
@@ -160,6 +160,10 @@ class SimplePipelineAdapter:
                     srt_path = generated_srt
                 else:
                     raise Exception("字幕生成失败")
+            
+            # 安全纠正字幕文本（剔除填充词 + 规则替换，保留时间戳结构）
+            from backend.utils.text_corrector import safe_correct_srt_file
+            safe_correct_srt_file(srt_path)
             
             emit_progress(self.project_id, "SUBTITLE", "字幕处理完成")
             
@@ -248,7 +252,7 @@ class SimplePipelineAdapter:
                     generated_srt = generate_subtitle_for_video(
                         video_path=Path(input_video_path),
                         output_path=srt_path,
-                        method="auto",
+                        method="funasr",
                         language="auto"
                     )
                     
@@ -261,6 +265,10 @@ class SimplePipelineAdapter:
                 except Exception as asr_error:
                     logger.error(f"自动生成字幕失败: {asr_error}")
                     raise Exception(f"缺少字幕文件，且自动生成失败: {asr_error}")
+            
+            # 安全纠正字幕文本（剔除填充词 + 规则替换，保留时间戳结构）
+            from backend.utils.text_corrector import safe_correct_srt_file
+            safe_correct_srt_file(srt_path)
             
             # 现在应该有字幕文件了，执行Step 1
             if srt_path and srt_path.exists():

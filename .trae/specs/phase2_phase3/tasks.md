@@ -143,3 +143,78 @@
   - `programmatic` TR-10.2: 边界准确率 >= 96%
   - `programmatic` TR-10.3: 延迟 < 200ms
 - **Notes**: 需要真实视频样本进行测试
+
+## [ ] Task 11: 强化话题切分边界结构化与建议接口
+- **Priority**: P1
+- **Depends On**: Task 5, Task 6
+- **Description**:
+  - 将 `boundary_suggestion` 输出规范化为结构化字段
+  - 增强 Step1 结果解析与降级处理逻辑
+  - 使边界调整建议可直接映射为 `extend_start`/`shrink_end`/`remove_segment` 等操作
+  - 减少依赖自由文本解析，提高边界修正稳定性
+- **Acceptance Criteria Addressed**: AC-4, AC-5
+- **Test Requirements**:
+  - `programmatic` TR-11.1: Step1 LLM 响应解析成功率 >= 98%（历史样本）
+  - `programmatic` TR-11.2: 结构化边界建议应用后错误调整率 < 5%
+- **Notes**: 重点改造 `backend/pipeline/funclip_style.py` 和相关 prompt
+
+## [ ] Task 12: 引入多信号边界辅助与动态阈值优化
+- **Priority**: P1
+- **Depends On**: Task 3, Task 4, Task 6
+- **Description**:
+  - 将关键帧/停顿/说话人/场景切换信号提前用于话题边界候选
+  - 在 Step1 之前生成边界候选点供 LLM 参考
+  - 添加话题时长与数量的动态阈值策略
+  - 强化跨段同一话题合并规则，增加语义相似度判断
+- **Acceptance Criteria Addressed**: AC-3, AC-4, AC-5
+- **Test Requirements**:
+  - `programmatic` TR-12.1: 混合内容中边界候选覆盖率提升 >= 10%
+  - `programmatic` TR-12.2: 相同语义跨段合并准确率提升
+- **Notes**: 重点改造 `backend/pipeline/step2_timeline.py`、`backend/pipeline/topic_postprocess.py` 和配置项
+
+## [ ] Task 13: Step1 前文本纠错与语义预处理
+- **Priority**: P1
+- **Depends On**: Task 6
+- **Description**:
+  - 实现 SRT 文本纠错与语义归一化模块
+  - 将说话人、停顿、断句、话题候选信息融入 Step1 输入
+  - 在 Step1 前将原始字幕转换为更符合语义的片段
+  - 保留原始 SRT 作为回退依据
+- **Subtasks**:
+  - Task 13.1: 设计 `TextCorrector` 模块与纠错接口（0.5d）
+  - Task 13.2: 实现规则级/统计级/语义级三层纠错策略（1.0d）
+  - Task 13.3: 实现说话人/停顿信息的语义断句与片段生成（1.0d）
+  - Task 13.4: 修改 `backend/pipeline/funclip_style.py`，让 Step1 使用预处理结果（0.5d）
+  - Task 13.5: 添加纠错元数据输出与回退机制（0.5d）
+- **Implementation Plan**:
+  1. Day 1: 定义 `TextCorrector` 接口，完成词典与同音词规则
+     - 产出：`TextCorrector` 类草案、`correct_text()` 返回格式、词典结构
+     - 验收：接口文档明确，示例输入输出 OK
+  2. Day 2: 集成 `pycorrector` 统计纠错，构建语义一致性校验
+     - 产出：规则级纠错 + `pycorrector` 纠错模块、纠错元数据收集
+     - 验收：对 10 条常见错别字测试样例纠错正确
+  3. Day 3: 开发说话人/停顿断句模块，生成语义片段
+     - 产出：语义片段生成函数、说话人合并与停顿断句规则
+     - 验收：同一说话人连续语句合并，长停顿处切分正确
+  4. Day 4: 修改 Step1 输入逻辑，增加回退与元数据输出
+     - 产出：`funclip_style.py` 中 Step1 输入改造、回退逻辑、原始文本备份
+     - 验收：Step1 入参包含纠错结果并可回退至原文本
+  5. Day 5: 编写单元测试、回归测试并验证效果
+     - 产出：`test_text_corrector.py`、`test_funclip_preprocessing.py`
+     - 验收：测试通过、Step1 边界稳定性对比报告
+- **Acceptance Criteria Addressed**: AC-4, AC-5, AC-7
+- **Test Requirements**:
+  - `programmatic` TR-13.1: 纠错后输入文本与原始 SRT 语义一致
+  - `programmatic` TR-13.2: Step1 话题边界稳定性提升
+  - `programmatic` TR-13.3: 纠错模块对常见同音词的校正率 >= 90%
+- **Notes**: 重点改造 `backend/utils/text_corrector.py`、`backend/utils/text_processor.py`、`backend/pipeline/funclip_style.py`
+- **Key Functions**:
+  - `TextCorrector.correct_text`
+  - `TextCorrector._apply_rule_corrections`
+  - `TextCorrector._apply_pycorrector_correction`
+  - `TextCorrector._validate_semantic_correction`
+  - `SemanticPreprocessor.generate_semantic_chunks`
+  - `SemanticPreprocessor._merge_speaker_segments`
+  - `SemanticPreprocessor._split_by_pause`
+  - `FunclipStyle._prepare_step1_input`
+  - `FunclipStyle._build_step1_prompt_input`

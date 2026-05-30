@@ -33,7 +33,7 @@ start "Celery Worker" cmd /k "python -m celery -A backend.core.celery_app worker
 
 echo.
 echo [4/5] 启动后端 API 服务...
-start "Backend API" cmd /k "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload"
+start "Backend API" cmd /k "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8090 --reload"
 
 echo.
 echo [5/5] 启动前端开发服务器（热重载）...

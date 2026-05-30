@@ -306,6 +306,24 @@ class TextProcessor:
             return []
     
     @staticmethod
+    def prepare_srt_for_llm(srt_text: str) -> str:
+        """将原始SRT文本预处理为带语义分段与纠错结果的LLM输入文本。"""
+        try:
+            from backend.utils.text_corrector import TextCorrector, SemanticPreprocessor
+            srt_entries = SemanticPreprocessor.parse_srt_text(srt_text)
+            if not srt_entries:
+                return srt_text
+            chunks = SemanticPreprocessor.generate_semantic_chunks(srt_entries)
+            corrector = TextCorrector()
+            enhanced = []
+            for chunk in chunks:
+                corrected_text, _, _ = corrector.correct_text(chunk['text'])
+                enhanced.append(f"[{chunk['start_str']} --> {chunk['end_str']}]\n{corrected_text}")
+            return "\n\n".join(enhanced)
+        except Exception:
+            return srt_text
+
+    @staticmethod
     def extract_text_by_time_range(text: str, srt_data: List[Dict], 
                                   start_time: str, end_time: str) -> str:
         """

@@ -261,7 +261,6 @@ const AccountHealthMonitor: React.FC<AccountHealthMonitorProps> = ({ onRefresh }
           status={status}
           size="small"
           showInfo={false}
-          strokeWidth={6}
         />
       </Tooltip>
     );

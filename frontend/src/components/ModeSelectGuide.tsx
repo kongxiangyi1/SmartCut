@@ -103,7 +103,7 @@ const ModeSelectGuide: React.FC<ModeSelectGuideProps> = ({
           borderWidth: selectedMode === modeInfo.mode ? 2 : 1,
           borderColor: selectedMode === modeInfo.mode ? '#1890ff' : undefined,
         }}
-        bodyStyle={{ padding: 16 }}
+        styles={{ body: { padding: 16 } }}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>

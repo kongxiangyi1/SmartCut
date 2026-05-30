@@ -7,497 +7,27 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import json
+from backend.pipeline.prompt_loader import get_funclip_prompt
 from backend.pipeline.step6_video import VideoGenerator
+from backend.pipeline.topic_postprocess import (
+    analyze_srt_text,
+    parse_srt_timeline as _parse_srt_timeline,
+    postprocess_funclip_topics,
+    resolve_funclip_sub_mode,
+    seconds_to_srt_time as _seconds_to_srt_time,
+    srt_time_to_seconds as _srt_time_to_seconds,
+    validate_segments_with_srt as _validate_segments_with_srt,
+)
+from backend.utils.text_corrector import TextCorrector, SemanticPreprocessor, _clean_filler_words
 
 logger = logging.getLogger(__name__)
 
-# 第一阶段Prompt：仅识别片段边界，不生成标题
-FUNCLIP_CLIP_ONLY_PROMPT = """## 任务
-分析下方SRT字幕，识别精彩的时间连续片段（单段），输出JSON数组。只输出JSON，不要任何解释。
-
-## 输入数据格式
-SRT字幕包含序号、时间范围和文本三部分：
-```
-1
-00:00:00,000 --> 00:00:05,000
-大家好欢迎来到直播间
-```
-条目间时间差为无字幕静音段。相邻短条目（每条≤3秒，间隙≤3秒）视为同一段连续内容，不做中断。
-
-## 输出格式（严格遵守）
-```json
-[
-  {
-    "id": "1",
-    "outline": "内容概述",
-    "start": "00:00:00,000",
-    "end": "00:05:30,123",
-    "final_score": 0.85,
-    "recommend_reason": "包含干货观点和金句冲突"
-  }
-]
-```
-时间格式hh:mm:ss,fff。最多4条片段，按精彩程度降序输出。起止时间必须对齐SRT条目首尾时间戳，严禁切割单条字幕内部时间段。没有精彩内容时输出[]。单个片段时长建议10秒以上，无硬性上限。
-
-## 评分标准
-final_score为看点价值的单一评分（0~1）。评分锚点：0.9=精彩金句或激烈冲突，0.7=干货知识或强转折，0.5=有趣互动或商品卖点，0.3=普通闲聊但有情绪。recommend_reason基于该片段实际内容撰写，每条必须不同，不超过20字。多段同分时按类型优先级排序：冲突金句 > 干货知识 > 商品卖点 > 趣味闲聊 > 日常讲述。"""
-
-# 第二阶段Prompt：为每个片段独立生成标题（仅基于该片段自己的字幕文本）
-FUNCLIP_TITLE_PROMPT = """你是一个短视频标题策划专家。根据下方字幕文本，生成1个吸引人的标题。
-
-## 核心原则
-1. **忠于原文**: 标题必须严格基于下方字幕文本，不得无中生有。
-2. **突出亮点**: 精准捕捉片段最核心的观点、最激烈的情绪或最有价值的信息。
-3. **精炼有力**: 简洁有冲击力，8~20个中文字符，可加感叹号。
-4. **用语规范**: 禁用低俗词汇（装逼、傻逼、他妈的等），字幕中的低俗措辞需替换为中性表述（犀利点评、直率吐槽）。
-5. **钩子写法优先**: 优先使用设问/悬念/对比/数字等钩子句式（如"为什么XX能卖爆？""XX的3个真相"），避免平铺直叙的"XX介绍""XX讨论"。
-
-## 该片段的字幕文本
-{clip_srt_text}
-
-## 参考信息（仅作背景了解，无需嵌入标题）
-话题：{outline}
-推荐理由：{recommend_reason}
-
-## 示例
-字幕：家人们今天这款面膜成分表前三全是好东西，价格才九块九
-输出：这款面膜成分太能打了
-
-## 输出
-只输出标题文本，不要引号、序号或任何额外内容。
-"""
-
-# ============================================================
-# 三步方案 Prompt：Step 1 边界识别（仅识别话题边界，不评分不生成标题）
-# ============================================================
-FUNCLIP_STEP1_BOUNDARY_PROMPT = """## 任务
-分析下方SRT字幕，识别所有独立话题的边界。你的任务是**划分话题边界**，不是评分。
-只输出JSON数组，不要任何解释或分析。
-
-## 输出格式（严格遵守）
-```json
-[
-  {
-    "id": "1",
-    "outline": "话题内容概述（基于实际SRT内容，50字以内）",
-    "topic_type": "knowledge",
-    "segments": [
-      {"start": "00:01:00,000", "end": "00:05:30,000"},
-      {"start": "00:12:00,000", "end": "00:14:00,000"}
-    ]
-  },
-  {
-    "id": "2",
-    "outline": "话题内容概述",
-    "topic_type": "highlight",
-    "segments": [
-      {"start": "00:08:00,000", "end": "00:09:30,000"}
-    ]
-  }
-]
-```
-
-**topic_type 分类**（必须准确归类）：
-- highlight: 冲突金句、情绪爆发、怼人名场面、激烈观点交锋
-- knowledge: 干货知识、技能讲解、深度分析
-- product: 产品推销、卖货讲解、优惠介绍
-- fun: 趣味段子、搞笑互动、娱乐内容
-- daily: 日常闲聊、普通互动、一般性讲述
-
-**segments 规则**：
-- 同一话题可能被其他话题打断，出现在时间轴多段，需用多个segment表示
-- segments 按时间升序排列
-- 时间格式 hh:mm:ss,fff（逗号分隔毫秒）
-- 起止时间必须对齐SRT条目首尾时间戳，严禁切割单条字幕
-
-## 输入数据格式
-SRT字幕包含序号、时间范围和文本三部分：
-```
-1
-00:00:00,000 --> 00:00:05,000
-大家好欢迎来到直播间
-```
-
-## 关键概念：什么是"完整话题"
-
-一个完整话题是一组逻辑上相互依赖的对话单元。判定方法是**依赖链检验**：
-> 去掉某段内容后，另一段变得不完整或难以理解 → 同话题
-
-### 前向依赖检验（相邻条目对SRT N和N+1）
-SRT(N+1)是否假设观众已经知道SRT(N)的信息？
-- 指代词：这/那/他/它 → "这个评论"
-- 因果词：为什么/所以/因此/因为 → "为什么王爷势力复杂"
-- 承前词：刚才/说到/提到/那你说 → "刚才那个顺口溜"
-- 对前文某表述的回应、解释、举例或延伸
-满足任意一条 → 依赖成立 → 同话题
-
-### 收尾检验（判断话题边界）
-SRT(N)是否达到了收尾状态？
-- 结论性表述：总之/所以说/明白了吧/你知道吧
-- 从具体案例回到一般性总结
-满足收尾 + SRT(N+1)不依赖SRT(N) → 此处为自然话题边界
-
-**情绪连续不拆分例外**：
-如果SRT(N)看似收尾，但SRT(N+1)与之满足以下任一条件，则视为未收尾，必须合并：
-① **同一情绪线延续**：SRT(N+1)继续在同一语境下发表评论/吐槽/怼人，话题关键词一致
-② **同一叙事延续**：SRT(N+1)引用/回指SRT(N)中提到的具体细节
-③ **同一对话对象延续**：SRT(N)和SRT(N+1)针对同一观众/事件的连续回应
-
-### 跨段话题合并（被其他话题打断的场景）
-同一话题可能被其他话题打断，出现在时间线多段。**归属同一话题**的条件：
-- 后文是对前文的补充、举例、延伸、深化
-- 后文是主播的个人经历结合来说明前文观点
-- 后文是对前文观点的总结、呼应
-
-**判定为新话题**的条件（满足任意一条）：
-- 主播明确说"换个话题""接下来说说""再聊一个"等换场话术
-- 前后内容语义完全无关，且无过渡衔接
-- 时间间隔超过180秒，中间穿插3个及以上独立无关话题，无语义承接
-
-**语义优先级兜底**：不论间隔和穿插数量，存在内容承接、观点回溯或明显语义延续 → 优先判定为同话题。但前文已有明确收尾总结的，后续即使出现相同关键词也不再自动承接。
-
-**不得强行合并**：语义完全无关的内容（如产品卖货、闲聊段子、正经知识讲解分别属于不同类别），即使由同一主播连续说出，也应为不同话题独立输出。
-
-## 数量控制
-- 输出 4~8 个话题，按时间升序排列 id
-- 没有可提取的内容时输出 []
-"""
-
-# ============================================================
-# 三步方案 Prompt：Step 2 批量评分（边界已确定，仅评分 + 可选边界建议）
-# ============================================================
-FUNCLIP_STEP2_BATCH_SCORE_PROMPT = """## 重要前提
-以下话题的边界已经过专业分析确定，你**不需要、也不应该**质疑或重新评估边界。
-你的唯一任务是对内容质量进行评分。即使你认为某个话题的边界可以更优，也请基于给定的SRT片段进行评分。
-
-## 任务
-对下方所有话题做评分。你必须在同一次判断中横向比较它们，确保评分可比较。
-
-## 所有话题
-```json
-[
-  {
-    "id": "1",
-    "outline": "话题概述",
-    "topic_type": "knowledge",
-    "total_duration_seconds": 185,
-    "srt_text": "00:01:00,000 --> 00:01:05,000\\n这是第一条字幕内容...\\n...(完整SRT)"
-  }
-]
-```
-
-## 评分维度（注意：仅评分，不修改边界）
-- 看点价值(0~1): 冲突金句/独家信息/情绪爆发。锚点：0.9=金句冲突，0.7=干货知识，0.5=日常讲述
-- 话题完整度(0~1): 引入+核心+收尾的完整度。锚点：0.9=三段完整，0.7=有核心+收尾，0.5=仅核心
-- 叙事流畅度(0~1): 逻辑连贯性。锚点：0.9=一气呵成，0.7=偶尔卡顿，0.5=多处卡顿
-
-## 计算
-final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
-
-## 输出
-```json
-{
-  "scores": [
-    {
-      "id": "1",
-      "final_score": 0.75,
-      "sub_scores": {"看点价值": 0.8, "话题完整度": 0.7, "叙事流畅度": 0.7},
-      "recommend_reason": "基于实际内容的推荐理由（≤20字）",
-      "boundary_suggestion": null
-    }
-  ]
-}
-```
-为**每一个**输入话题打分并输出，不要跳过任何话题。不要自行过滤低分话题。
-recommend_reason 每条不同，基于实际内容，≤20字。
-boundary_suggestion 为 null 或字符串（格式见下方说明）。
-
-## boundary_suggestion 字段（可选）
-如果你在评分过程中发现某个话题的边界存在明显问题（例如：开头缺少必要的引入铺垫、结尾被过早截断、或者包含了明显不属于该话题的内容），你可以在此字段给出建议。格式为：
-
-"建议[扩展/收缩/前移/后移]边界：[具体说明，含建议的时间偏移秒数]"
-
-示例：
-- "建议扩展开头：话题开头缺少产品引入铺垫，00:01:00前约30秒有铺垫内容，建议前移30秒以包含引入"
-- "建议收缩结尾：00:08:30之后的内容已切换到下一话题，建议后移-15秒"
-- "建议前移开头：当前开头落在了一条SRT的中间位置，建议前移5秒对齐SRT边界"
-- "建议移除内部段：segment #2 的内容与该话题无关，属于误归类"
-
-如果你认为边界没有问题，请填写 null。大多数情况下此字段应为 null。
-
-注意：此字段仅作为建议供后续代码参考，不会自动修改边界。
-"""
-
-# ============================================================
-# 三步方案 Prompt：Step 3 批量标题生成
-# ============================================================
-FUNCLIP_STEP3_BATCH_TITLE_PROMPT = """## 任务
-为下方每个话题独立生成一个吸引人的短视频标题。每个标题必须基于该话题的实际SRT内容。
-
-## 核心原则
-1. **忠于原文**: 标题必须严格基于该话题的SRT文本，不得无中生有。
-2. **突出亮点**: 精准捕捉片段最核心的观点、最激烈的情绪或最有价值的信息。
-3. **精炼有力**: 简洁有冲击力，8~20个中文字符，可加感叹号。
-4. **用语规范**: 禁用低俗词汇（装逼、傻逼、他妈的等），字幕中的低俗措辞需替换为中性表述（如犀利点评、直率吐槽）。
-5. **钩子写法优先**: 优先使用设问/悬念/对比/数字等钩子句式，避免平铺直叙。
-6. **差异化**: 每个话题的标题必须不同，不可重复。
-
-## 所有话题
-```json
-[
-  {
-    "id": "1",
-    "outline": "话题概述",
-    "topic_type": "knowledge",
-    "recommend_reason": "推荐理由",
-    "srt_text": "00:01:00,000 --> 00:01:05,000\\n第一条字幕...\\n...(该话题的完整SRT)"
-  }
-]
-```
-
-## 输出
-```json
-{
-  "titles": [
-    {"id": "1", "title": "生成的标题文本"},
-    {"id": "2", "title": "生成的标题文本"}
-  ]
-}
-```
-为**每一个**输入话题生成标题，不要跳过。
-每个标题8~20个中文字符，禁止低俗词汇。
-"""
-
-# ============================================================
-# 合并方案 Prompt：单次LLM调用完成话题切分 + 多段合并 + 标题生成
-# ============================================================
-FUNCLIP_MERGED_PROMPT = """## 任务
-提取下方SRT字幕中的完整话题作为精彩片段。只输出JSON数组，不要任何解释或分析。
-
-## 输出格式（严格遵守）
-```json
-[
-  {
-    "id": "1",
-    "title": "话题1的标题文本（知识分享类）",
-    "outline": "主播从某话题引入，展开核心观点，最后收尾总结的完整内容",
-    "segments": [
-      {"start": "00:01:00,000", "end": "00:05:30,000"}
-    ],
-    "final_score": 0.85,
-    "recommend_reason": "推荐理由示例文字",
-    "removed_sections": []
-  },
-  {
-    "id": "2",
-    "title": "话题2的标题文本（卖货讲解类）",
-    "outline": "主播介绍某产品的功能特点、使用效果和优惠活动",
-    "segments": [
-      {"start": "00:08:00,000", "end": "00:09:00,000"}
-    ],
-    "final_score": 0.75,
-    "recommend_reason": "推荐理由示例文字",
-    "removed_sections": []
-  }
-]
-```
-时间格式hh:mm:ss,fff（逗号分隔毫秒）。没有可提取的内容时输出[]。识别出多个独立话题时，每个话题输出为一个独立对象，不要将无关话题合并为同一个话题。
-
-**重要：以上JSON示例仅展示输出格式，示例中的标题/概述/推荐理由均为占位文字，你必须根据实际字幕内容生成，不得照抄示例文字。**
-
-## 输入数据格式
-SRT字幕包含序号、时间范围和文本三部分：
-```
-1
-00:00:00,000 --> 00:00:05,000
-大家好欢迎来到直播间
-```
-条目间时间差为无字幕静音段。
-
-**静音推断方法**：SRT条目N结束到条目N+1开始之间的时间差值即为静音时间段。差值超过2秒的连续区间可标记为需剔除的纯静音。推理时无需音频信息，仅通过SRT时间戳差值判断即可。
-
-## 关键概念：什么是"完整话题"
-
-一个完整话题是一组逻辑上相互依赖的对话单元。判定方法是**依赖链检验**：
-> 去掉某段内容后，另一段变得不完整或难以理解 → 同话题
-
-一个完整话题通常包含以下阶段（了解此结构有助于边界判断，但不要求话题必须拥有所有阶段）：
-- **前导引入/钩子**：开启话题的启动话术（互动请求、设问引入、故事开头、顺口溜/段子、叙事背景铺垫），**一切为后续核心内容做铺垫的"引子"都属于前导引入**，应与核心内容合并为同一话题
-- **核心论述**：围绕主题展开的正文内容
-- **收尾总结**：话题的自然结束（结论性表述、一般化归纳）
-
-### 前向依赖检验（相邻条目对SRT N和N+1）
-SRT(N+1)是否假设观众已经知道SRT(N)的信息？
-- 指代词：这/那/他/它 → "这个评论"
-- 因果词：为什么/所以/因此/因为 → "为什么王爷势力复杂"
-- 承前词：刚才/说到/提到/那你说 → "刚才那个顺口溜"
-- 对前文某表述的回应、解释、举例或延伸
-满足任意一条 → 依赖成立 → 同话题
-
-### 收尾检验（判断话题边界）
-SRT(N)是否达到了收尾状态？
-- 结论性表述：总之/所以说/明白了吧/你知道吧
-- 从具体案例回到一般性总结
-满足收尾 + SRT(N+1)不依赖SRT(N) → 此处为自然话题边界
-
-**情绪连续不拆分例外**：
-如果SRT(N)看似收尾，但SRT(N+1)与之满足以下任一条件，则视为未收尾，必须合并：
-① **同一情绪线延续**：SRT(N+1)继续在同一语境下发表评论/吐槽/怼人，话题关键词（人物、事件、产品）一致
-② **同一叙事延续**：SRT(N+1)引用/回指SRT(N)中提到的具体细节
-③ **同一对话对象延续**：SRT(N)和SRT(N+1)针对同一观众/同一事件的连续回应
-
-**判断方法**：去掉收尾词后，SRT(N)和SRT(N+1)是否仍然是同一段连贯语流？如是，则未收尾，合并。除非SRT(N+1)使用了明确换场话术（"接下来说说""换个话题"）。
-
-### 跨间隙语义验证（4~60秒间隙）
-ASR产生的短SRT条目可能制造虚假间隙。相邻短条目（每条≤3秒，间隙≤3秒）先合并为语义段落再做话题分析。
-跨间隙判定（同话题依条件）：
-- 后块是对前块的案例验证或例证
-- 后块是对前块的延伸、对比或补充
-- 后块引用了前块的核心概念（如"刚才说的XX"）
-
-### 跨段话题合并（被其他话题打断的场景）
-同一话题可能被其他话题打断，出现在时间线多段。**归属同一话题**的条件：
-- 后文是对前文的补充、举例、延伸、深化
-- 后文是主播的个人经历结合来说明前文观点
-- 后文是对前文观点的总结、呼应、口号收尾
-
-**判定为新话题**的条件（满足任意一条）：
-- 主播明确说"换个话题""接下来说说""再聊一个"等换场话术
-- 前后内容语义完全无关，且无过渡衔接
-- **时间间隔超过180秒**，中间穿插**3个及以上**独立无关话题，无语义承接
-- **时间间隔超过600秒**，即便只穿插1个无关话题，无语义承接
-
-**语义优先级兜底**：不论间隔和穿插数量，存在内容承接、观点回溯（"刚才说到"）或明显语义延续 → 优先判定为同话题。但前文已有明确收尾总结的，后续即使出现相同关键词也不再自动承接。
-
-**不得强行合并**：语义完全无关的内容（如产品卖货、闲聊段子、正经知识讲解分别属于不同类别），即使由同一主播连续说出，也应为不同话题独立输出。
-
-**话题类型切换是新话题的强信号**：当主播从知识讲解/故事叙述突然切换到产品推销/卖货话术时，即使话题看似相关（如"地域性格"→"鸡肉丸产品"），也判定为新话题，不得合并。卖货话术、知识分享、闲聊段子是三种不同话题类型。
-
-**自然过渡不拆分**：如果内容从钩子（段子/故事/顺口溜）自然推进到核心话题，或从话题自然过渡到产品讲解（如"说到这个XX，我家就有这个产品"），节奏连贯无明显切换信号，应视为同一完整片段，不得强行拆分。
-
-### 反向追溯规则
-如果收尾被选入但前导引入未被包含，需向前回溯定位引入的起点：
-1. 检查收尾是否引用前文的某个概念/案例
-2. 向前回溯到这些概念首次出现的位置
-3. 继续回溯直到遇到明确的新话题启动器（换场话术、上一个话题的收尾信号、连续30秒以上无SRT条目），最大回溯范围不超过当前topic起始时间前5分钟
-4. 将前导引入和核心论述合并进来
-
-### 溯源牵引规则
-如果核心内容依赖于前文的叙事背景（如"食神里的撒尿牛丸"引入牛肉丸），去掉背景后观众不知道"为什么突然说这个"，则该背景必须作为前导引入保留。
-
-**注意**：同一关键词/同一产品 ≠ 同一个话题。两次出现无语义承接且间隔超过180秒+穿插3个话题 → 视为不同独立话题。
-
-## 处理步骤
-
-### 第一步：话题识别与完善
-① **依赖链分析**：通读字幕，用上述前向依赖检验和收尾检验识别出每个独立话题的核心段落。不要因为主播停顿几秒就认为是新话题。
-② **跨段合并**：用跨段话题合并规则，将同一话题被打散的段落合并为同一话题。
-③ **反向追溯**：对合并后的每个话题，检查收尾是否引用了前文概念/案例。如果收尾被选入但前导引入未被包含，向前回溯补齐前导引入和核心论述。
-④ **溯源牵引**：检查核心内容是否依赖于前文的叙事背景，如果是则将背景作为前导引入保留。
-
-### 第二步：对齐边界到SRT条目
-每个segment的start和end必须对齐到某条SRT的首尾时间戳。严禁落在两条SRT之间的间隙中，严禁切割单条字幕内部。
-
-**同一话题的多个segment之间不得跳过有文本的SRT条目**。如果两个segment属于同一话题且之间有文本SRT未被包含，应扩展segment边界覆盖它们。
-
-### 第三步：标记纯静音
-removed_sections仅用于存放segment时间覆盖范围内、被SRT条目实际占据时间段之外的超过2秒连续无字幕纯静音空档。例如segment范围为00:01:00-00:05:30，其中SRT条目的时间戳覆盖了00:01:00-00:02:30和00:02:35-00:05:30，则00:02:30-00:02:35这5秒静音间隙可放入removed_sections。所有带文本的SRT条目必须保留在segments中。不同话题之间的天然间隙不属于任何segment，无需标记。
-
-### 第四步：打分与排序
-评分标准：
-- **看点价值（0~1）**：内容是否包含冲突金句、独家信息、情绪爆发等。0.9=强烈金句冲突，0.7=有价值干货，0.5=日常讲述，0.3=平淡无意义
-- **话题完整度（0~1）**：是否具备引入+核心+收尾的完整链路。0.9=三段完整，0.7=有核心+收尾，0.5=仅有核心论述，0.3=被截断
-- **叙事流畅度（0~1）**：逻辑连续、无重复啰嗦、衔接自然。0.9=一气呵成，0.7=偶尔卡顿不影响理解，0.5=多处卡顿但仍连贯，0.3=逻辑断裂、多处重复、难以理解
-
-```
-final_score = 看点价值×0.4 + 话题完整度×0.3 + 叙事流畅度×0.3
-```
-排序优先级（从高到低）：先按话题类型分类排序，同类型内再按分数降序排列。**类型分类仅影响排序优先级，不影响看点价值评分的计算**——所有片段都需按评分标准计算final_score。
-- **冲突金句**：情绪峰值、激烈争论、反转观点、爆点金句
-- **干货知识**：知识点讲解、经验分享、数据分析、实用技巧
-- **商品卖点**：产品价格、功能效果、使用体验、购买引导
-- **趣味闲聊**：段子、八卦、娱乐互动、轻松话题
-- **常规日常讲述**：过渡铺垫、流程介绍、无亮点日常对话
-同优先级内按分数降序排列。仅输出final_score ≥ 0.5的片段，低于0.5的不纳入输出。
-最多取前**6个**作为最终输出。
-单个segment时长建议10秒~5分钟。最终输出的话题**总播放时长建议不低于20秒**（多个segment之和）。低于20秒的短话题，如果语义上可自然合并到相邻主话题则优先合并；无法合并的高评分短金句（评分≥0.7）可保留独立输出，但须在推荐理由中标注"短精华"。
-
-### 第五步：自检复核
-1. **被选中片段**的所有SRT条目均完成归属，无遗漏无交叉（未选中的话题SRT无需覆盖标注）
-2. 不同片段之间的segments时间区间无重叠
-3. 每条**被选中片段**的SRT仅归属于一个片段
-4. **边界验证**：去掉前导部分后读核心内容——如果变得奇怪则边界应扩展包含；同样检查收尾最后一条SRT之后紧邻的下一条SRT是否存在语义承接——如果存在但未被包含，则边界扩展
-5. removed_sections中的时间区间，均对应SRT条目间超过2秒的连续间隙，无文本SRT条目被剔除
-6. 所有时间戳格式为hh:mm:ss,fff（逗号分隔毫秒）
-
-## 输出字段说明
-
-| 字段 | 说明 |
-|------|------|
-| id | 在完成打分和排序、取前6个输出后，按起始时间升序重新编号："1","2","3"... |
-| title | 概括话题核心看点的标题，用语正面积极，禁用低俗词汇。不得直接照搬字幕中的原始低俗措辞（装逼/傻逼/他妈的等），需替换为中性或正面表述（犀利点评/直率吐槽/独特见解） |
-| outline | 描述从引入到收尾的全部话题内容梗概 |
-| segments | 话题分散的多段时间区间数组，按开始时间升序排列 |
-| final_score | 0~1浮点数 |
-| recommend_reason | 基于该片段实际内容撰写，突出独特看点，每条片段必须不同，不超过30字 |
-| removed_sections | 仅存放合规静音剔除时段，每项包含start/end。无静音则为空数组 |
-
-## 全局硬性约束
-1. 时间格式hh:mm:ss,fff（逗号分隔毫秒），匹配SRT时间格式
-2. 不同片段的segments时间区间完全独立，无交叉
-3. 每条**被选中片段**的SRT唯一归属于一个片段，未选中话题的SRT无归属要求
-4. 单条SRT不可拆分，segment起止只能对齐SRT条目的首尾时间戳
-5. 文本不可剔除，所有带文本的SRT条目保留在segments中
-6. 多人连麦围绕同一主题发言时统一合并为单个话题，不按人物拆分
-7. 话题无收尾话术而戛然中止时以最后一句核心论述的时间戳作为结束边界
-8. 低俗词汇的过滤规则：
-    - 低俗/侮辱性措辞只影响标题生成（标题中替换为中性表述），不影响内容价值评分
-    - **例外**：如果该片段的核心看点是知识分享、剧情讲解、产品引出的前置铺垫——即使含有少量低俗口语化表达，应保留内容价值评分，仅在标题中做中性化处理；不得因低俗用词将整段有价值话题丢弃
-9. 最多6个独立话题片段，最少输出2个（字幕只有单个话题时最少1个）
-10. 仅输出JSON数组，禁止增加多余文字、注释或说明内容
-11. **产品推介按引出方式处理**：
-    (a) **自然引出应合并**：如果产品是从话题内容自然延伸出来的——如"电影里的撒尿牛丸→我们家的牛肉丸"、"说到XX问题/场景→我家产品就是这个效果"——则属于"自然过渡不拆分"场景，应合并为同一话题
-    (b) **突兀出现应独立**：如果产品讲解与前后话题无内容承接关系（如刚聊完历史突然说"来，上链接"），则独立输出为单独卖货话题
-    (c) **多个独立产品互不合并**：连续介绍的多个不同产品（先卖牛肉丸再卖鸡蛋再卖手表）各自为独立话题
-    **判断方法**：去掉产品讲解部分，看前文话题是否完整自洽。完整自洽→产品独立；不完整（缺少铺垫/过渡）→产品是自然延伸。
-12. **标题用语规范**：
-    - 禁用低俗词汇：装逼/傻逼/他妈的/逼味等，标题中必须替换为中性表述（犀利点评/直率吐槽/独特见解）
-    - 禁用直接侮辱性表述：字幕中怼人/骂人的内容，标题用"对XX的独特看法""引发争议的观点"等中性化概括
-    - 标题须独立创作，不得照抄字幕中任何原始措辞
-13. **跨话题连续性检测**：
-    多个CLIP在供给阶段是独立切分的，合并阶段须检测相邻CLIP的话题边界：
-    - 如果某个CLIP的最后1~3条SRT与另一个CLIP的开头明显是同一话题的延续
-      （如"那个就是河北人做采购的"→"那个隔着电话都逼逼味十足"），
-      则这两个CLIP应视为同一话题，合并为一个segment组
-    - 判断标志：两段内容共享核心关键词（同一人物/事件/产品/地域）、
-      存在明显的指代承接（"那个""就是""他们"指向同一对象）、
-      去掉CLIP边界后前后是连贯的一段话
-    - 产品/商品名称本身不构成话题合并依据
-      （如CLIP1提到"手表"，CLIP2详细讲"手表功能"→仍需检查内容是否在同一叙事线内）"""
-
-# 填充词列表（预处理时剔除——只剔除无意义的口吃/犹豫/套话）
-FILLER_WORDS = {
-    # 犹豫音
-    '嗯', '呃', '哦', '嗯嗯', '呃呃',
-    # 笑声
-    '哈哈', '嘿嘿',
-    # 口头禅/犹豫词
-    '那个', '那个啥', '这个', '这个这个', '那个那个',
-    # 重复性停顿（"然后然后"、"就是就是"等语无伦次）
-    '然后然后', '就是就是', '那个那个',
-    # 套话（无信息量的引导语）
-    '我们可以看到', '大家可以看到',
-    '总的来说', '总的来说呢',
-}
-
-
-def _clean_filler_words(text: str) -> str:
-    """从文本中剔除填充词"""
-    import re
-    for word in sorted(FILLER_WORDS, key=len, reverse=True):
-        text = re.sub(re.escape(word), '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+FUNCLIP_CLIP_ONLY_PROMPT = get_funclip_prompt('clip_only')
+FUNCLIP_TITLE_PROMPT = get_funclip_prompt('title')
+FUNCLIP_STEP1_BOUNDARY_PROMPT = get_funclip_prompt('step1_boundary')
+FUNCLIP_STEP2_BATCH_SCORE_PROMPT = get_funclip_prompt('step2_batch_score')
+FUNCLIP_STEP3_BATCH_TITLE_PROMPT = get_funclip_prompt('step3_batch_title')
+FUNCLIP_MERGED_PROMPT = get_funclip_prompt('merged')
 
 
 def _deduplicate_clip_segments(merged_clips: List[Dict]) -> List[Dict]:
@@ -687,52 +217,6 @@ def _merge_srt_segments(srt_path: Path, merged_clips: List[Dict]) -> List[Dict]:
     return video_clips
 
 
-def _srt_time_to_seconds(time_str: str) -> float:
-    """将SRT时间格式(hh:mm:ss,fff)转换为秒数"""
-    time_str = time_str.replace(',', '.')
-    parts = time_str.split(':')
-    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-
-
-def _seconds_to_srt_time(seconds: float) -> str:
-    """将秒数转换为SRT时间格式(hh:mm:ss,fff)"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:06.3f}".replace('.', ',')
-
-
-def _parse_srt_timeline(srt_text: str) -> List[Dict]:
-    """解析SRT文本，返回按时间排序的条目列表"""
-    entries = []
-    blocks = re.split(r'\n\s*\n', srt_text.strip())
-    for block in blocks:
-        lines = block.strip().split('\n')
-        if len(lines) < 3:
-            continue
-        
-        time_line = lines[1]
-        time_match = re.match(r'(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})', time_line)
-        if not time_match:
-            continue
-        
-        start = _srt_time_to_seconds(time_match.group(1))
-        end = _srt_time_to_seconds(time_match.group(2))
-        text = ' '.join(lines[2:]).strip()
-        
-        entries.append({
-            'start': start,
-            'end': end,
-            'start_str': time_match.group(1).replace('.', ','),
-            'end_str': time_match.group(2).replace('.', ','),
-            'text': text,
-            'duration': end - start
-        })
-    
-    entries.sort(key=lambda e: e['start'])
-    return entries
-
-
 def _filter_vad_silence_by_segments(vad_silence: List[tuple],
                                      segments: List[Dict],
                                      min_silence_duration: float = 2.0) -> List[Dict]:
@@ -766,139 +250,6 @@ def _filter_vad_silence_by_segments(vad_silence: List[tuple],
                 })
 
     return result
-
-
-def _validate_segments_with_srt(merged_clips: List[Dict], srt_text: str, 
-                                  silence_threshold: float = 2.0) -> List[Dict]:
-    """
-    用SRT时间戳验证和修正LLM返回的片段边界
-
-    Args:
-        merged_clips: LLM返回的片段列表
-        srt_text: 原始SRT文本
-        silence_threshold: 静音阈值（秒），SRT间隙超过此值标记为静音
-
-    Returns:
-        修正后的片段列表
-    """
-    entries = _parse_srt_timeline(srt_text)
-    if not entries:
-        logger.warning("无法解析SRT时间线，跳过验证")
-        return merged_clips
-
-    logger.info(f"SRT时间线解析完成: {len(entries)} 条字幕条目")
-    
-    for clip in merged_clips:
-        segments = clip.get('segments', [])
-        if not segments:
-            continue
-        
-        validated_segments = []
-        all_removed = clip.get('removed_sections', [])
-        
-        for seg in segments:
-            seg_start = _srt_time_to_seconds(seg.get('start', '00:00:00,000'))
-            seg_end = _srt_time_to_seconds(seg.get('end', '00:00:00,000'))
-            
-            # 找到完全在segment范围内的SRT条目
-            contained = [e for e in entries if e['start'] >= seg_start and e['end'] <= seg_end]
-            
-            if not contained:
-                # 检测LLM是否切割了SRT内部（seg边界落在某条SRT中间）
-                overlapping = [e for e in entries if e['start'] < seg_end and e['end'] > seg_start]
-                if overlapping:
-                    first = overlapping[0]
-                    last = overlapping[-1]
-                    overlap_start = min(seg_start, first['start'])
-                    overlap_end = max(seg_end, last['end'])
-                    logger.info(f"  修复LLM切割SRT: [{seg['start']}->{seg['end']}] 包含{len(overlapping)}条SRT，"
-                                f"扩展为[{_seconds_to_srt_time(overlap_start)}->{_seconds_to_srt_time(overlap_end)}]")
-                    seg_start = overlap_start
-                    seg_end = overlap_end
-                    contained = overlapping
-                else:
-                    # 该segment内没有任何SRT条目 -> 全是静音，剔除
-                    all_removed.append({
-                        'start': seg['start'],
-                        'end': seg['end'],
-                        'reason': f"该时间范围内无字幕（纯静音）"
-                    })
-                    logger.info(f"  剔除无字幕段: {seg['start']} -> {seg['end']}")
-                    continue
-            
-            # 对齐边界到第一条和最后一条SRT的时间
-            validated_start = contained[0]['start']
-            validated_end = contained[-1]['end']
-            
-            # 检查内部间隙
-            for i in range(len(contained) - 1):
-                gap = contained[i + 1]['start'] - contained[i]['end']
-                if gap > silence_threshold:
-                    all_removed.append({
-                        'start': _seconds_to_srt_time(contained[i]['end']),
-                        'end': _seconds_to_srt_time(contained[i + 1]['start']),
-                        'reason': f"SRT时间戳间隙{gap:.1f}秒（静音）"
-                    })
-                    logger.info(f"  内部静音: {_seconds_to_srt_time(contained[i]['end'])} -> "
-                                f"{_seconds_to_srt_time(contained[i + 1]['start'])} ({gap:.1f}秒)")
-            
-            validated_segments.append({
-                'start': _seconds_to_srt_time(validated_start),
-                'end': _seconds_to_srt_time(validated_end)
-            })
-            
-            # 记录边界修正量
-            start_diff = validated_start - seg_start
-            end_diff = seg_end - validated_end
-            if abs(start_diff) > 0.1 or abs(end_diff) > 0.1:
-                logger.info(f"  边界修正: [{seg['start']}->{seg['end']}] -> "
-                            f"[{_seconds_to_srt_time(validated_start)}->{_seconds_to_srt_time(validated_end)}] "
-                            f"(前修{start_diff:.1f}s, 后修{-end_diff:.1f}s)")
-        
-        # ===== 新增：填充同一clip内segment之间的间隙和重叠 =====
-        # 如果间隙中有带文本的SRT条目，合并前后segment；重叠段也合并
-        if len(validated_segments) >= 2:
-            i = 0
-            while i < len(validated_segments) - 1:
-                curr_end_sec = _srt_time_to_seconds(validated_segments[i]['end'])
-                next_start_sec = _srt_time_to_seconds(validated_segments[i+1]['start'])
-                
-                # 重叠处理：后一段开始时间在前一段结束之前
-                if curr_end_sec >= next_start_sec:
-                    logger.info(f"  修复重叠: {validated_segments[i]['end']}->{validated_segments[i+1]['start']}")
-                    validated_segments[i]['end'] = validated_segments[i+1]['end']
-                    del validated_segments[i+1]
-                    continue
-                
-                # 找到间隙中完全包含的SRT条目
-                gap_srts = [
-                    e for e in entries
-                    if e['start'] >= curr_end_sec and e['end'] <= next_start_sec
-                    and e.get('text', '').strip()
-                ]
-                
-                if gap_srts:
-                    logger.info(f"  填充间隙: {validated_segments[i]['end']}->{validated_segments[i+1]['start']} "
-                                f"(含{len(gap_srts)}条有文本SRT)")
-                    # 合并：当前段延伸到下一段结束
-                    validated_segments[i]['end'] = validated_segments[i+1]['end']
-                    del validated_segments[i+1]
-                    # i不变，继续检查新间隙
-                else:
-                    i += 1
-            logger.info(f"  间隙填充后: {len(validated_segments)} 个时间段")
-        
-        clip['segments'] = validated_segments if validated_segments else segments
-        
-        # 合并去重removed_sections
-        existing_starts = {(r['start'], r['end']) for r in clip.get('removed_sections', [])}
-        for r in all_removed:
-            key = (r['start'], r['end'])
-            if key not in existing_starts:
-                clip.setdefault('removed_sections', []).append(r)
-                existing_starts.add(key)
-    
-    return merged_clips
 
 
 def parse_funclip_timestamps(input_text):
@@ -1250,7 +601,7 @@ VULGAR_WORD_MAP = {
 def _validate_step1_segments(topics: List[Dict], srt_text: str) -> List[Dict]:
     for topic in topics:
         topic.setdefault('removed_sections', [])
-    return _validate_segments_with_srt(topics, srt_text)
+    return postprocess_funclip_topics(topics, srt_text)
 
 
 def _merge_scores_to_topics(topics: List[Dict], scores: List[Dict]) -> List[Dict]:
@@ -1341,6 +692,7 @@ class FunClipStyleProcessor:
                 - "merged": 合并方案（单次LLM调用完成所有任务）
                 - "three_step": 三步方案（边界识别→评分→标题，含检查点与降级）
         """
+        processing_mode = resolve_funclip_sub_mode(srt_path, processing_mode)
         logger.info("="*60)
         logger.info(f"使用FunClip风格处理开始 [模式: {processing_mode}]")
         logger.info("="*60)
@@ -1464,26 +816,15 @@ class FunClipStyleProcessor:
     def _llm_process_merged(self, srt_text: str):
         """合并方案：单次LLM调用完成话题切分 + 多段合并 + 标题生成 + 静音剔除"""
         try:
-            # ===== 预处理：剔除填充词 =====
-            logger.info("开始预处理SRT文本（剔除填充词）...")
+            # ===== 预处理：剔除填充词 + 语义断句 + 纠错 =====
+            logger.info("开始预处理SRT文本（剔除填充词 + 语义断句 + 纠错）...")
             original_len = len(srt_text)
-            cleaned_srt = _clean_filler_words(srt_text)
-            logger.info(f"预处理完成: {original_len} -> {len(cleaned_srt)} 字符 (剔除 {original_len - len(cleaned_srt)} 字符)")
-
-            enhanced_text = None
             try:
-                from backend.pipeline.topic_precluster import TopicPreCluster
-                precluster = TopicPreCluster()
-                report = precluster.process(srt_text)
-                if report.clusters:
-                    logger.info(f"预聚类完成: {report.stats}")
-                    enhanced_text = report.enhanced_text
-                else:
-                    logger.info(f"预聚类: 未发现有效聚类 ({report.stats['total_entries']}条, {report.stats.get('coverage_ratio', 0):.0%}覆盖)")
-                    enhanced_text = cleaned_srt
+                enhanced_text = self._prepare_enhanced_text(srt_text)
+                logger.info(f"预处理完成: {original_len} -> {len(enhanced_text)} 字符")
             except Exception as e:
-                logger.warning(f"预聚类失败，回退到清理后SRT: {e}")
-                enhanced_text = cleaned_srt
+                logger.warning(f"Step1 预处理失败，回退到原始SRT文本: {e}")
+                enhanced_text = _clean_filler_words(srt_text)
 
             logger.info("开始合并方案LLM调用（话题切分 + 标题生成 + 静音剔除）...")
             logger.info(f"输入SRT文本长度: {len(enhanced_text)} 字符")
@@ -1531,8 +872,8 @@ class FunClipStyleProcessor:
 
             # SRT时间戳验证：修正边界 + 填充间隙 + 标记内部静音
             logger.info("开始SRT时间戳验证（修正LLM边界 + 填充间隙 + 剔除静音）...")
-            merged_clips = _validate_segments_with_srt(merged_clips, srt_text)
-            logger.info(f"SRT验证完成")
+            merged_clips = postprocess_funclip_topics(merged_clips, srt_text)
+            logger.info(f"SRT验证与时长校验完成")
 
             # 输出详细分组日志：每个话题的segments、字幕内容、归类原因
             _log_topic_details(merged_clips, srt_text)
@@ -1562,14 +903,32 @@ class FunClipStyleProcessor:
     def _prepare_enhanced_text(self, srt_text: str) -> str:
         cleaned_srt = _clean_filler_words(srt_text)
         try:
-            from backend.pipeline.topic_precluster import TopicPreCluster
-            precluster = TopicPreCluster()
-            report = precluster.process(srt_text)
-            if report.clusters:
-                logger.info(f"预聚类完成: {report.stats}")
-                return report.enhanced_text
+            srt_entries = SemanticPreprocessor.parse_srt_text(cleaned_srt)
+            if not srt_entries:
+                return cleaned_srt
+
+            preprocessor = SemanticPreprocessor()
+            chunks = preprocessor.generate_semantic_chunks(srt_entries)
+            text_corrector = TextCorrector()
+            enhanced_chunks = []
+            for chunk in chunks:
+                corrected_text, corrections, confidence = text_corrector.correct_text(chunk['text'])
+                enhanced_chunks.append(
+                    f"[{chunk['start_str']} --> {chunk['end_str']}]\n{corrected_text}"
+                )
+
+            enhanced_text = "\n\n".join(enhanced_chunks)
+            try:
+                debug_path = self.metadata_dir / "step1_preprocessed_text.txt"
+                with open(debug_path, 'w', encoding='utf-8') as f:
+                    f.write(enhanced_text)
+                logger.info(f"预处理结果已保存到: {debug_path}")
+            except Exception as e:
+                logger.warning(f"保存 Step1 预处理文本失败: {e}")
+
+            return enhanced_text
         except Exception as e:
-            logger.warning(f"预聚类失败: {e}")
+            logger.warning(f"Step1 语义预处理失败，回退到填充词清理后的文本: {e}")
         return cleaned_srt
 
     def _extract_srt_for_topic(self, segments: List[Dict], srt_entries: List[Dict]) -> str:
@@ -1615,16 +974,26 @@ class FunClipStyleProcessor:
 
         return topics_with_srt
 
-    def _prepare_step3_input(self, topics: List[Dict]) -> List[Dict]:
-        srt_entries = None
+    def _prepare_step3_input(self, topics: List[Dict], srt_entries: List[Dict]) -> List[Dict]:
         topics_data = []
         for topic in topics:
             segments = topic.get('segments', [])
             srt_text = ""
-            if segments and srt_entries is None:
-                srt_entries = []
-            if segments:
-                srt_text = "SRT文本未提取"
+            if segments and srt_entries:
+                srt_text = self._extract_srt_for_topic(segments, srt_entries)
+                if len(srt_text) > 2000:
+                    srt_lines = srt_text.split('\n')
+                    head_lines = srt_lines[:80]
+                    tail_lines = srt_lines[-30:]
+                    srt_text = (
+                        '\n'.join(head_lines)
+                        + '\n...(中间省略)...\n'
+                        + '\n'.join(tail_lines)
+                    )
+                    logger.info(
+                        f"话题{topic.get('id', '')} Step3 SRT过长({len(srt_lines)}条)，"
+                        f"截取首{len(head_lines)}+尾{len(tail_lines)}条"
+                    )
 
             topics_data.append({
                 'id': topic.get('id', ''),
@@ -1905,7 +1274,7 @@ class FunClipStyleProcessor:
             step3_titles = checkpoint.get_step_output('step3_titles')
             if step3_titles is None:
                 logger.info("Step 3 检查点未命中，开始执行...")
-                step3_input = self._prepare_step3_input(step1_topics)
+                step3_input = self._prepare_step3_input(step1_topics, srt_entries)
                 step3_titles = self._call_step3_batch_title(step3_input)
 
                 if step3_titles:
@@ -2343,6 +1712,7 @@ def run_funclip_pipeline(srt_path: Path,
             - "merged": 合并方案（单次LLM调用）
     """
     processor = FunClipStyleProcessor(metadata_dir)
+    processing_mode = resolve_funclip_sub_mode(srt_path, processing_mode)
     clips, collections = processor.process(srt_path, processing_mode)
 
     logger.info("=" * 60)

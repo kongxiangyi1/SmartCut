@@ -286,14 +286,9 @@ class TimelineExtractor:
         # 5. 修复重叠时间
         if all_timeline_data:
             logger.info("开始修复重叠时间...")
-            all_timeline_data = self._fix_overlapping_times(all_timeline_data)
-            logger.info("重叠时间修复完成。")
-
-        # 6. 【修复】合并跨边界的话题
-        if all_timeline_data:
-            logger.info("开始合并跨边界的话题...")
-            all_timeline_data = self._merge_cross_boundary_topics(all_timeline_data)
-            logger.info("跨边界话题合并完成。")
+            from backend.pipeline.topic_postprocess import postprocess_timeline
+            all_timeline_data = postprocess_timeline(all_timeline_data)
+            logger.info("话题后处理完成（重叠修复/跨块合并/时长校验）。")
 
         # 7. 【新增】验证话题完整性
         if all_timeline_data:
@@ -523,181 +518,12 @@ class TimelineExtractor:
         return True
 
     def _fix_overlapping_times(self, timeline_data: List[Dict]) -> List[Dict]:
-        """
-        修复重叠时间并过滤不满足最小时长要求的话题。
-        规则：
-        1. 跳过开始时间>=结束时间的无效话题
-        2. 话题内容（不含产品相关关键词）时长<90秒的跳过
-        3. 产品讲解类话题时长<30秒的跳过
-        4. 重叠的时间区间进行修正
-        """
-        if not timeline_data:
-            return []
+        from backend.pipeline.topic_postprocess import fix_overlapping_timeline
+        return fix_overlapping_timeline(timeline_data)
 
-        logger.info(f"开始处理 {len(timeline_data)} 个话题的时间区间...")
-        fixed_data = []
-
-        for timeline_item in timeline_data:
-            start_time = timeline_item.get('start_time', '')
-            end_time = timeline_item.get('end_time', '')
-
-            if not start_time or not end_time:
-                logger.warning(f"  > 话题 '{timeline_item.get('outline', '未知')}' 缺少时间信息，跳过")
-                continue
-
-            start_sec = self.text_processor.time_to_seconds(start_time)
-            end_sec = self.text_processor.time_to_seconds(end_time)
-
-            if start_sec >= end_sec:
-                logger.warning(f"  > 话题 '{timeline_item['outline']}' 的开始时间({start_time})大于或等于结束时间({end_time})，跳过该话题")
-                continue
-
-            duration_sec = end_sec - start_sec
-            outline_lower = timeline_item.get('outline', '').lower()
-
-            if '产品' in outline_lower or '销售' in outline_lower or '介绍' in outline_lower or '优惠' in outline_lower:
-                if duration_sec < 15:
-                    logger.warning(f"  > 产品讲解类话题 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于15秒，跳过该话题")
-                    continue
-            else:
-                if duration_sec < 30:
-                    logger.warning(f"  > 话题类内容 '{timeline_item['outline']}' 时长({duration_sec:.1f}秒)小于30秒，跳过该话题")
-                    continue
-
-            fixed_data.append(timeline_item)
-
-        if not fixed_data:
-            logger.warning("所有话题均被过滤，无有效时间区间")
-            return []
-
-        for i in range(len(fixed_data) - 1):
-            current = fixed_data[i]
-            next_item = fixed_data[i + 1]
-
-            current_end_sec = self.text_processor.time_to_seconds(current['end_time'])
-            next_start_sec = self.text_processor.time_to_seconds(next_item['start_time'])
-
-            if next_start_sec < current_end_sec:
-                overlap_sec = current_end_sec - next_start_sec
-                logger.warning(f"  > 发现重叠: '{current['outline']}' 和 '{next_item['outline']}' 重叠 {overlap_sec:.1f}秒")
-
-                mid_point = (current_end_sec + next_start_sec) / 2
-                current_hms = self._seconds_to_time(mid_point - 0.1)
-                next_item['start_time'] = self._seconds_to_time(mid_point + 0.1)
-                current['end_time'] = current_hms
-                logger.warning(f"  > 已修正: '{current['outline']}' 结束时间调整为 {current['end_time']}")
-                logger.warning(f"  > 已修正: '{next_item['outline']}' 开始时间调整为 {next_item['start_time']}")
-
-        logger.info(f"时间区间处理完成，{len(fixed_data)}/{len(timeline_data)} 个话题有效")
-        return fixed_data
-    
     def _merge_cross_boundary_topics(self, timeline_data: List[Dict]) -> List[Dict]:
-        """
-        【修复】合并跨边界分割的话题。
-        
-        合并依据（满足以下条件之一即可合并）：
-        1. 跨越块边界 + 时间接近（-2~30秒） + 标题高度相似（> 0.5）
-        2. 跨越块边界 + 时间非常接近（< 5秒） 
-        3. 跨越块边界 + 一个标题是另一个标题的一部分
-        
-        Args:
-            timeline_data: 原始时间线数据
-            
-        Returns:
-            合并后的话题列表
-        """
-        if len(timeline_data) < 2:
-            return timeline_data
-        
-        logger.info(f"开始检查跨边界话题合并，共 {len(timeline_data)} 个话题...")
-        
-        # 按chunk_index和开始时间排序
-        sorted_data = sorted(timeline_data, key=lambda x: (
-            x.get('chunk_index', 0), 
-            self.text_processor.time_to_seconds(x.get('start_time', '00:00:00,000'))
-        ))
-        
-        merged = []
-        i = 0
-        
-        while i < len(sorted_data):
-            current = sorted_data[i]
-            
-            # 检查是否需要与下一个话题合并
-            if i + 1 < len(sorted_data):
-                next_item = sorted_data[i + 1]
-                
-                current_chunk = current.get('chunk_index', 0)
-                next_chunk = next_item.get('chunk_index', 0)
-                current_end = self.text_processor.time_to_seconds(current.get('end_time', '00:00:00,000'))
-                next_start = self.text_processor.time_to_seconds(next_item.get('start_time', '00:00:00,000'))
-                
-                # 计算标题相似度
-                current_title = str(current.get('outline', '')).lower().strip()
-                next_title = str(next_item.get('outline', '')).lower().strip()
-                titles_similar = self._calculate_title_similarity(current_title, next_title)
-                
-                # 检查是否应该合并（更宽松的条件）
-                time_gap = next_start - current_end
-                should_merge = False
-                merge_reason = ""
-                
-                # 条件1：跨越块边界 + 合理时间间隔（-2~30秒）+ 标题有一定相似度（> 0.5）
-                if current_chunk != next_chunk and time_gap < 30 and time_gap >= -2:
-                    if titles_similar > 0.5:
-                        should_merge = True
-                        merge_reason = f"跨块相似话题(相似度={titles_similar:.2f}, 间隔={time_gap:.1f}s)"
-                    elif titles_similar > 0.3 and time_gap < 10:
-                        # 时间更近时，相似度要求可以更低
-                        should_merge = True
-                        merge_reason = f"跨块近时间话题(相似度={titles_similar:.2f}, 间隔={time_gap:.1f}s)"
-                    # 条件2：包含关系（一个标题是另一个的一部分）
-                    elif current_title in next_title or next_title in current_title:
-                        should_merge = True
-                        merge_reason = f"跨块包含关系话题(间隔={time_gap:.1f}s)"
-                    # 条件3：时间非常接近（< 5秒），即使标题不太相似
-                    elif time_gap < 5:
-                        should_merge = True
-                        merge_reason = f"跨块极近时间话题(间隔={time_gap:.1f}s)"
-                
-                if should_merge:
-                    logger.info(f"  > 合并话题: '{current_title[:40]}...' -> '{next_title[:40]}...' ({merge_reason})")
-                    
-                    # 合并时间范围
-                    merged_topic = current.copy()
-                    merged_topic['start_time'] = current['start_time']
-                    merged_topic['end_time'] = next_item['end_time']
-                    merged_topic['merged'] = True
-                    merged_topic['original_parts'] = [
-                        {'outline': current.get('outline'), 'start': current.get('start_time'), 'end': current.get('end_time')},
-                        {'outline': next_item.get('outline'), 'start': next_item.get('start_time'), 'end': next_item.get('end_time')}
-                    ]
-                    
-                    # 使用较完整的内容作为标题
-                    if len(next_title) > len(current_title):
-                        merged_topic['outline'] = next_item.get('outline')
-                    # 如果两个标题都有内容，可以合并它们
-                    elif current_title and next_title:
-                        # 提取共同部分或选择更全面的描述
-                        if len(current_title) > 5 and len(next_title) > 5:
-                            # 尝试合并标题（取第一个标题的前半部分 + 第二个标题的后半部分）
-                            # 或者直接使用较长的那个
-                            pass
-                    
-                    merged.append(merged_topic)
-                    i += 2  # 跳过已合并的两个话题
-                    continue
-            
-            # 不需要合并的话题
-            merged.append(current)
-            i += 1
-        
-        if len(merged) != len(timeline_data):
-            logger.info(f"  > 合并完成: {len(timeline_data)} -> {len(merged)} 个话题")
-        else:
-            logger.info("  > 没有发现需要合并的跨边界话题")
-        
-        return merged
+        from backend.pipeline.topic_postprocess import merge_cross_boundary_topics
+        return merge_cross_boundary_topics(timeline_data)
     
     def _calculate_title_similarity(self, title1: str, title2: str) -> float:
         """

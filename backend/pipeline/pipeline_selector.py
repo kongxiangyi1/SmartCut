@@ -52,8 +52,8 @@ class PipelineSelector:
                     config = json.load(f)
                 self._funclip_sub_mode = config.get('funclip_sub_mode', 'two_stage')
                 self.mode = config.get('mode', 'legacy')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"重新加载流水线配置失败: {e}")
 
     def _load_mode(self):
         """从配置文件加载模式（初始化用）"""
@@ -101,6 +101,8 @@ class PipelineSelector:
         Returns:
             "legacy", "funclip", 或 "ab_test"
         """
+        self._reload_lazy()
+
         if self.mode == "legacy":
             return "legacy"
 

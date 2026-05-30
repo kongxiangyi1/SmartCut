@@ -263,11 +263,12 @@ class SilenceProcessor:
         try:
             # 使用 FFmpeg silencedetect 滤镜检测静音
             # 只分析指定时间范围内的音频
+            duration = max(0.1, float(end_time) - float(start_time))
             cmd = [
                 'ffmpeg',
                 '-i', str(audio_path),
                 '-ss', str(start_time),
-                '-to', str(end_time),
+                '-t', str(duration),
                 '-af', f'silencedetect=noise={silence_threshold}dB:d={buffer_duration}',
                 '-f', 'null',
                 '-'

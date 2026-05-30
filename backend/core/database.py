@@ -29,3 +29,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# Ensure model modules are imported so SQLAlchemy's registry is populated.
+# This avoids mapper initialization errors when individual modules import
+# model classes before all related models have been defined.
+try:
+    import backend.models  # noqa: F401
+except Exception:
+    # Import failures here should not prevent the application from starting,
+    # but may indicate a deeper issue that should be logged during runtime.
+    pass

@@ -393,7 +393,7 @@ const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             title="字幕" 
             size="small"
             style={{ height: '100%' }}
-            bodyStyle={{ padding: '12px', height: 'calc(100% - 57px)', overflow: 'hidden' }}
+            styles={{ body: { padding: '12px', height: 'calc(100% - 57px)', overflow: 'hidden' } }}
           >
             <div style={{ 
               height: '100%', 
@@ -417,7 +417,7 @@ const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             title="样式" 
             size="small"
             style={{ height: '100%' }}
-            bodyStyle={{ padding: '12px', height: 'calc(100% - 57px)', overflow: 'hidden' }}
+            styles={{ body: { padding: '12px', height: 'calc(100% - 57px)', overflow: 'hidden' } }}
           >
             <div style={{ 
               height: '100%', 
@@ -581,7 +581,7 @@ const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             title="视频预览" 
             size="small"
             style={{ height: '100%' }}
-            bodyStyle={{ padding: '12px', height: 'calc(100% - 57px)', display: 'flex', flexDirection: 'column' }}
+            styles={{ body: { padding: '12px', height: 'calc(100% - 57px)', display: 'flex', flexDirection: 'column' } }}
           >
             <div style={{ flex: 1, position: 'relative', marginBottom: '12px' }}>
               <ReactPlayer

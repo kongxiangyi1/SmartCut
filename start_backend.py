@@ -6,15 +6,15 @@ print("=" * 60)
 print("🔍 检查后端服务状态")
 print("=" * 60)
 
-# 检查端口8000
-port_8000_running = False
+# 检查端口8090
+port_8090_running = False
 for conn in psutil.net_connections():
-    if conn.laddr.port == 8000 and conn.status == 'LISTEN':
-        port_8000_running = True
+    if conn.laddr.port == 8090 and conn.status == 'LISTEN':
+        port_8090_running = True
         break
 
-if port_8000_running:
-    print("✅ 后端服务正在运行 (端口8000)")
+if port_8090_running:
+    print("✅ 后端服务正在运行 (端口8090)")
 else:
     print("❌ 后端服务未运行，尝试启动...")
     
@@ -24,7 +24,7 @@ else:
             "python", "-m", "uvicorn", 
             "backend.main:app", 
             "--host", "0.0.0.0", 
-            "--port", "8000",
+            "--port", "8090",
             "--reload"
         ]
         
@@ -44,7 +44,7 @@ else:
             # 检查端口是否被监听
             port_ready = False
             for conn in psutil.net_connections():
-                if conn.laddr.port == 8000 and conn.status == 'LISTEN':
+                if conn.laddr.port == 8090 and conn.status == 'LISTEN':
                     port_ready = True
                     break
             if port_ready:

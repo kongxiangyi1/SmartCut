@@ -116,16 +116,25 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             })
         
         # Convert to response schema
+        project_type_val = getattr(project, 'project_type', None)
+        if isinstance(project_type_val, str):
+            project_type_val = project_type_val.strip()
+            try:
+                ProjectType(project_type_val.lower())
+                project_type_val = project_type_val.lower()
+            except ValueError:
+                project_type_val = 'default'
+        
         return ProjectResponse(
             id=str(getattr(project, 'id', '')),
             name=str(getattr(project, 'name', '')),
             description=str(getattr(project, 'description', '')) if getattr(project, 'description', None) is not None else None,
-                project_type=ProjectType(getattr(project, 'project_type')) if hasattr(project, 'project_type') and getattr(project, 'project_type', None) is not None else ProjectType.DEFAULT,
+            project_type=ProjectType(project_type_val) if project_type_val else ProjectType.DEFAULT,
             status=getattr(project, 'status', ProjectStatus.PENDING),
             source_url=project.project_metadata.get("source_url") if getattr(project, 'project_metadata', None) else None,
             source_file=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,
-            video_path=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,  # 添加video_path字段供前端使用
-                thumbnail=None,  # 在列表API中不返回缩略图以减少数据量
+            video_path=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,
+            thumbnail=None,
             settings=getattr(project, 'processing_config', {}) or {},
             created_at=self._convert_utc_to_local(getattr(project, 'created_at', None)),
             updated_at=self._convert_utc_to_local(getattr(project, 'updated_at', None)),
@@ -181,16 +190,34 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
                     'video_path': clip.video_path,
                 })
             
+            project_type_val = getattr(project, 'project_type', None)
+            if isinstance(project_type_val, str):
+                project_type_val = project_type_val.strip()
+                try:
+                    ProjectType(project_type_val.lower())
+                    project_type_val = project_type_val.lower()
+                except ValueError:
+                    project_type_val = 'default'
+            
+            project_status_val = getattr(project, 'status', None)
+            if isinstance(project_status_val, str):
+                project_status_val = project_status_val.strip()
+                try:
+                    ProjectStatus(project_status_val.lower())
+                    project_status_val = project_status_val.lower()
+                except ValueError:
+                    project_status_val = 'pending'
+            
             project_responses.append(ProjectResponse(
                 id=str(getattr(project, 'id', '')),
                 name=str(getattr(project, 'name', '')),
                 description=str(getattr(project, 'description', '')) if getattr(project, 'description', None) is not None else None,
-                project_type=ProjectType(getattr(project, 'project_type')) if hasattr(project, 'project_type') and getattr(project, 'project_type', None) is not None else ProjectType.DEFAULT,
-                status=ProjectStatus(getattr(project, 'status')) if hasattr(project, 'status') and getattr(project, 'status', None) is not None else ProjectStatus.PENDING,
+                project_type=ProjectType(project_type_val) if project_type_val else ProjectType.DEFAULT,
+                status=ProjectStatus(project_status_val) if project_status_val else ProjectStatus.PENDING,
                 source_url=project.project_metadata.get("source_url") if getattr(project, 'project_metadata', None) else None,
                 source_file=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,
-                video_path=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,  # 添加video_path字段供前端使用
-                thumbnail=None,  # 在列表API中不返回缩略图以减少数据量
+                video_path=str(getattr(project, 'video_path', '')) if getattr(project, 'video_path', None) is not None else None,
+                thumbnail=None,
                 settings=getattr(project, 'processing_config', {}) or {},
                 created_at=self._convert_utc_to_local(getattr(project, 'created_at', None)),
                 updated_at=self._convert_utc_to_local(getattr(project, 'updated_at', None)),

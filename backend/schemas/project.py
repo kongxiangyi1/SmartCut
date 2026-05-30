@@ -89,8 +89,8 @@ class ProjectListResponse(BaseSchema):
 
 class ProjectFilter(BaseSchema):
     """Schema for project filtering."""
-    status: Optional[ProjectStatus] = Field(default=None, description="Filter by status")
-    project_type: Optional[ProjectType] = Field(default=None, description="Filter by project type")
+    status: Optional[str] = Field(default=None, description="Filter by status")
+    project_type: Optional[str] = Field(default=None, description="Filter by project type")
     search: Optional[str] = Field(default=None, description="Search in name and description")
 
 
