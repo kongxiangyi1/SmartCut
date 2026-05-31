@@ -838,7 +838,7 @@ For questions or suggestions, please contact us through:
 #### 📧 Other Contact Methods
 
 - Submit a [GitHub Issue](https://github.com/zhouxiaoka/autoclip/issues)
-- Send email to: [christine_zhouye@163.com](mailto:christine_zhouye@163.com)
+- Send email to: [kxy_1@163.com](mailto:kxy_1@163.com)
 - Add the above QQ or Feishu contact
 
 ## 📄 License

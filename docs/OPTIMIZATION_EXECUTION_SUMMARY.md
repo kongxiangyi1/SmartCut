@@ -224,7 +224,7 @@ tail -f logs/backend.log | grep "optimized"
 ### 联系方式
 
 - **GitHub Issues**: https://github.com/zhouxiaoka/autoclip/issues
-- **邮箱**: christine_zhouye@163.com
+- **邮箱**: kxy_1@163.com
 
 ---
 

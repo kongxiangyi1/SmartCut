@@ -159,6 +159,6 @@ python -m uvicorn backend.main:app --host 0.0.0.0 --port 8090
 如果回滚后问题持续，请联系：
 
 - **GitHub Issues**: https://github.com/zhouxiaoka/autoclip/issues
-- **邮箱**: christine_zhouye@163.com
+- **邮箱**: kxy_1@163.com
 
 回滚报告模板已保存在 `logs/rollback_report.md`
