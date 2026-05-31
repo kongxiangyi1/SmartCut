@@ -358,15 +358,17 @@ def _get_context_snippets(srt_text: str, seg: Dict, window: int = 3) -> str:
     entries = _parse_srt_timeline(srt_text)
     if not entries:
         return ''
-    s = _srt_time_to_seconds(seg['start'])
-    idx = 0
-    for i, e in enumerate(entries):
-        if e['start'] >= s:
-            idx = i
-            break
-    start = max(0, idx - window)
-    end = min(len(entries), idx + window + 1)
-    return '\n'.join([f"{entries[i]['start_str']} --> {entries[i]['end_str']}  {entries[i]['text']}" for i in range(start, end)])
+    try:
+        seg_start = _srt_time_to_seconds(seg['start'])
+        seg_end = _srt_time_to_seconds(seg['end'])
+    except Exception:
+        return ''
+
+    # 仅返回严格属于该 segment 范围内的字幕（start >= seg_start 且 end <= seg_end）
+    contained = [e for e in entries if e['start'] >= seg_start and e['end'] <= seg_end]
+    if not contained:
+        return ''
+    return '\n'.join([f"{e['start_str']} --> {e['end_str']}  {e['text']}" for e in contained])
 
 
 def _apply_short_segment_policy(self, merged_clips: List[Dict], srt_text: str) -> List[Dict]:
