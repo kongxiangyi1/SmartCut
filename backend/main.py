@@ -81,8 +81,8 @@ from core.database import engine, Base
 
 # Create FastAPI app
 app = FastAPI(
-    title="AutoClip API",
-    description="AI视频切片处理API",
+    title="SmartCut API",
+    description="AI视频智能切片系统",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -91,7 +91,7 @@ app = FastAPI(
 # Create database tables
 @app.on_event("startup")
 async def startup_event():
-    logger.info("启动AutoClip API服务...")
+    logger.info("启动SmartCut API服务...")
     # 不再导入模型，因为api_router已经导入了
     # 直接创建表
     Base.metadata.create_all(bind=engine)

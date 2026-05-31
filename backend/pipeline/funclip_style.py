@@ -17,6 +17,7 @@ from backend.pipeline.topic_postprocess import (
     seconds_to_srt_time as _seconds_to_srt_time,
     srt_time_to_seconds as _srt_time_to_seconds,
     validate_segments_with_srt as _validate_segments_with_srt,
+    get_topic_duration_limits,
 )
 from backend.utils.text_corrector import TextCorrector, SemanticPreprocessor, _clean_filler_words
 
@@ -39,30 +40,97 @@ def _deduplicate_clip_segments(merged_clips: List[Dict]) -> List[Dict]:
     if len(merged_clips) < 2:
         return merged_clips
 
-    # 按segments数量升序排序（少的优先保留），记录原始位置用于回写
-    indexed = list(enumerate(merged_clips))
-    indexed.sort(key=lambda x: len(x[1].get('segments', [])))
+    # 基于 segment-level confidence + IoU 的去重策略
+    # 1) 为每个 segment 计算可信度：优先使用 seg['confidence']，否则基于字幕密度估算
+    # 2) 对任意两个跨clip的 segment，如果 IoU > IOU_THRESHOLD，则保留置信度更高的那一端
+    IOU_THRESHOLD = 0.5
 
-    reserved_ranges = []  # [(start_seconds, end_seconds)] 已保留的时间范围
+    def _seg_conf(seg):
+        try:
+            if 'confidence' in seg:
+                return float(seg.get('confidence') or 0.0)
+        except Exception:
+            pass
+        # 备选估算：字幕条目密度（简化）
+        try:
+            s = _srt_time_to_seconds(seg['start'])
+            e = _srt_time_to_seconds(seg['end'])
+            dur = max(0.001, e - s)
+            # count SRT entries by scanning pre-saved index? 这里采用粗估：短时段优先
+            density_score = min(1.0, (len(seg.get('srt_entries', [])) / dur) if seg.get('srt_entries') else 0.0)
+            return density_score
+        except Exception:
+            return 0.0
 
-    for orig_idx, clip in indexed:
-        original_segments = clip.get('segments', [])
-        filtered = []
-        for seg in original_segments:
-            seg_start = _srt_time_to_seconds(seg['start'])
-            seg_end = _srt_time_to_seconds(seg['end'])
+    def _iou(seg_a, seg_b):
+        a_s = _srt_time_to_seconds(seg_a['start'])
+        a_e = _srt_time_to_seconds(seg_a['end'])
+        b_s = _srt_time_to_seconds(seg_b['start'])
+        b_e = _srt_time_to_seconds(seg_b['end'])
+        inter_s = max(a_s, b_s)
+        inter_e = min(a_e, b_e)
+        if inter_e <= inter_s:
+            return 0.0
+        inter = inter_e - inter_s
+        union = (a_e - a_s) + (b_e - b_s) - inter
+        return inter / union if union > 0 else 0.0
 
-            has_overlap = False
-            for rs, re in reserved_ranges:
-                if seg_start < re and seg_end > rs:
-                    has_overlap = True
+    # 收集所有 segments 并按置信度降序处理，先保留高置信段
+    all_segs = []  # tuples (clip_idx, seg_idx, seg)
+    for ci, clip in enumerate(merged_clips):
+        for si, seg in enumerate(clip.get('segments', [])):
+            all_segs.append((ci, si, seg))
+
+    # sort by confidence desc, longer duration tie-breaker smaller first
+    all_segs.sort(key=lambda x: (-_seg_conf(x[2]), _srt_time_to_seconds(x[2]['end']) - _srt_time_to_seconds(x[2]['start'])))
+
+    kept_ranges = []  # list of (start,end)
+    removed_map = {}  # clip_idx -> list of removed segment indices
+
+    for ci, si, seg in all_segs:
+        s = _srt_time_to_seconds(seg['start'])
+        e = _srt_time_to_seconds(seg['end'])
+        conflicted = False
+        for kr_s, kr_e, kr_seg in kept_ranges:
+            # 计算 IoU
+            inter_s = max(s, kr_s)
+            inter_e = min(e, kr_e)
+            if inter_e <= inter_s:
+                continue
+            inter = inter_e - inter_s
+            union = (e - s) + (kr_e - kr_s) - inter
+            iou = inter / union if union > 0 else 0.0
+            if iou > IOU_THRESHOLD:
+                # 比较置信度
+                if _seg_conf(seg) <= _seg_conf(kr_seg):
+                    conflicted = True
                     break
+                else:
+                    # 当前 seg 更强，移除已保留的 kr_seg（标记为 removed）
+                    for idx, (a, b, ks) in enumerate(kept_ranges):
+                        if ks is kr_seg:
+                            kept_ranges.pop(idx)
+                            removed_map.setdefault(a, []).append(ks)
+                            break
+        if not conflicted:
+            kept_ranges.append((s, e, seg))
 
-            if not has_overlap:
-                filtered.append(seg)
-                reserved_ranges.append((seg_start, seg_end))
+    # 根据 kept_ranges 回写每个 clip 的 segments
+    new_clips = []
+    for ci, clip in enumerate(merged_clips):
+        kept = []
+        for s, e, seg in kept_ranges:
+            # 如果 seg 属于当前 clip (通过对象相等判断)
+            if seg in clip.get('segments', []):
+                kept.append(seg)
+        if kept:
+            clip['segments'] = sorted(kept, key=lambda x: _srt_time_to_seconds(x['start']))
+            new_clips.append(clip)
+        else:
+            # clip 没有被保留任何 segment，则降级为移除
+            logger.info(f"跨clip去重: 移除了 clip {clip.get('id','?')} 因与更高置信片段冲突")
 
-        merged_clips[orig_idx]['segments'] = filtered
+    return new_clips
 
     # 移除没有segments的clip
     result = [c for c in merged_clips if c.get('segments')]
@@ -250,6 +318,120 @@ def _filter_vad_silence_by_segments(vad_silence: List[tuple],
                 })
 
     return result
+
+
+def _safe_parse_json(text: str):
+    import json, re
+    txt = (text or '').strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", txt)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                return None
+        return None
+
+
+def _weighted_segment_conf(segments: List[Dict]) -> float:
+    total = 0.0
+    total_dur = 0.0
+    for seg in segments:
+        try:
+            conf = float(seg.get('confidence') or 0.0)
+        except Exception:
+            conf = 0.0
+        try:
+            s = _srt_time_to_seconds(seg['start'])
+            e = _srt_time_to_seconds(seg['end'])
+            dur = max(0.001, e - s)
+        except Exception:
+            dur = 1.0
+        total += conf * dur
+        total_dur += dur
+    return (total / total_dur) if total_dur > 0 else 0.0
+
+
+def _get_context_snippets(srt_text: str, seg: Dict, window: int = 3) -> str:
+    entries = _parse_srt_timeline(srt_text)
+    if not entries:
+        return ''
+    s = _srt_time_to_seconds(seg['start'])
+    idx = 0
+    for i, e in enumerate(entries):
+        if e['start'] >= s:
+            idx = i
+            break
+    start = max(0, idx - window)
+    end = min(len(entries), idx + window + 1)
+    return '\n'.join([f"{entries[i]['start_str']} --> {entries[i]['end_str']}  {entries[i]['text']}" for i in range(start, end)])
+
+
+def _apply_short_segment_policy(self, merged_clips: List[Dict], srt_text: str) -> List[Dict]:
+    """只保留高置信短片段；对置信处于边界值的短片段，调用二次LLM确认。"""
+    HIGH_KEEP_CONF = 0.60
+    BORDERLINE_LOW = 0.40
+    MIN_SECONDS = get_topic_duration_limits()['min_seconds']
+    kept = []
+    for clip in merged_clips:
+        segments = clip.get('segments', [])
+        duration = sum((_srt_time_to_seconds(s['end']) - _srt_time_to_seconds(s['start'])) for s in segments) if segments else 0.0
+        wconf = _weighted_segment_conf(segments)
+        llm_score = float(clip.get('final_score') or clip.get('score') or 0.0)
+
+        if duration >= MIN_SECONDS:
+            kept.append(clip)
+            continue
+
+        # 高置信短片段直接保留
+        if wconf >= HIGH_KEEP_CONF or llm_score >= 0.65:
+            clip['duration_warning'] = 'too_short_but_kept'
+            kept.append(clip)
+            continue
+
+        # 边界置信：调用二次LLM确认是否保留
+        if wconf >= BORDERLINE_LOW:
+            try:
+                prompt = (
+                    "请判断：下列话题是否应以当前划定时间作为独立精彩片段保留。\n"
+                    "返回严格JSON: {\"keep\": true|false, \"reason\": \"...\"}。\n"
+                    f"话题outline: {clip.get('outline','')}\n"
+                    f"final_score: {llm_score:.3f}, weighted_seg_conf: {wconf:.3f}, duration: {duration:.1f}s\n"
+                )
+                if segments:
+                    prompt += "segments:\n"
+                    for seg in segments:
+                        prompt += f" - {seg.get('start')} -> {seg.get('end')}, conf={seg.get('confidence',0.0)}\n"
+                    prompt += "上下文字幕（前后3条）:\n"
+                    prompt += _get_context_snippets(srt_text, segments[0], window=3)
+
+                resp = self.llm_manager.current_provider.call(
+                    FUNCLIP_MERGED_PROMPT,  # use same provider; prompt as instruction
+                    prompt,
+                    max_tokens=256,
+                    temperature=0,
+                )
+                parsed = _safe_parse_json(resp.content or '')
+                if isinstance(parsed, dict) and parsed.get('keep'):
+                    clip['duration_warning'] = 'too_short_kept_after_llm'
+                    kept.append(clip)
+                    continue
+                else:
+                    logger.info(f"二次LLM判定不保留短片段: {clip.get('outline')} -> {parsed}")
+                    clip['needs_review'] = True
+                    continue
+            except Exception as e:
+                logger.warning(f"二次LLM验证失败，按不保留处理: {e}")
+                clip['needs_review'] = True
+                continue
+
+        # 默认：太短且低置信 -> 标注为 needs_review（不保留）
+        clip['needs_review'] = True
+
+    return kept
+
 
 
 def parse_funclip_timestamps(input_text):
@@ -682,7 +864,7 @@ class FunClipStyleProcessor:
         self.chunks_dir = self.metadata_dir / "funclip_chunks"
         self.chunks_dir.mkdir(parents=True, exist_ok=True)
     
-    def process(self, srt_path: Path, processing_mode: str = "two_stage"):
+    def process(self, srt_path: Path, processing_mode: str = "two_stage", vad_path: Path = None, asr_path: Path = None):
         """完整的单步处理流程
 
         Args:
@@ -701,7 +883,7 @@ class FunClipStyleProcessor:
         srt_text = self._read_srt(srt_path)
         
         # 2. 单步LLM处理（根据模式选择）
-        clips, collections = self._single_step_llm_process(srt_text, processing_mode)
+        clips, collections = self._single_step_llm_process(srt_text, processing_mode, vad_path=vad_path, asr_path=asr_path)
         
         # 3. 保存结果
         self._save_results(clips, collections)
@@ -717,14 +899,14 @@ class FunClipStyleProcessor:
             logger.warning(f"读取SRT失败: {e}")
             return ""
     
-    def _single_step_llm_process(self, srt_text: str, processing_mode: str = "two_stage"):
+    def _single_step_llm_process(self, srt_text: str, processing_mode: str = "two_stage", vad_path: Path = None, asr_path: Path = None):
         """单步LLM处理，根据模式选择不同方案"""
         if not self.llm_manager.current_provider:
             logger.warning("没有可用的LLM提供商，使用降级方案")
             return self._fallback_process(srt_text)
         
         if processing_mode == "merged":
-            return self._llm_process_merged(srt_text)
+            return self._llm_process_merged(srt_text, vad_path=vad_path, asr_path=asr_path)
         elif processing_mode == "three_step":
             return self._llm_process_three_step(srt_text)
         else:
@@ -733,14 +915,26 @@ class FunClipStyleProcessor:
     def _llm_process_with_llm(self, srt_text: str):
         """两阶段LLM处理：1.识别片段 2.每段独立生成标题"""
         try:
+            # ===== 预处理：剔除填充词 + 语义断句 + 纠错 =====
+            logger.info("开始预处理SRT文本（剔除填充词 + 语义断句 + 纠错）...")
+            original_len = len(srt_text)
+            try:
+                enhanced_text = self._prepare_enhanced_text(srt_text)
+                logger.info(f"预处理完成: {original_len} -> {len(enhanced_text)} 字符")
+            except Exception as e:
+                logger.warning(f"预处理失败，回退到填充词清理后的文本: {e}")
+                enhanced_text = _clean_filler_words(srt_text)
+
             # ===== 第一阶段：仅识别片段边界 =====
             logger.info("开始第一阶段LLM调用（识别片段边界）...")
-            logger.info(f"输入SRT文本长度: {len(srt_text)} 字符")
-            
+            logger.info(f"输入SRT文本长度: {len(enhanced_text)} 字符")
+
             response = self.llm_manager.current_provider.call(
                 FUNCLIP_CLIP_ONLY_PROMPT,
-                "这是待裁剪的视频srt字幕：\n" + srt_text,
-                max_tokens=8192
+                "这是待裁剪的视频srt字幕：\n" + enhanced_text,
+                max_tokens=16384,
+                temperature=0,
+                seed=42
             )
             
             if not response or not response.content:
@@ -813,7 +1007,7 @@ class FunClipStyleProcessor:
             logger.warning(f"LLM处理失败: {e}，使用降级方案")
             return self._fallback_process(srt_text)
     
-    def _llm_process_merged(self, srt_text: str):
+    def _llm_process_merged(self, srt_text: str, vad_path: Path = None, asr_path: Path = None):
         """合并方案：单次LLM调用完成话题切分 + 多段合并 + 标题生成 + 静音剔除"""
         try:
             # ===== 预处理：剔除填充词 + 语义断句 + 纠错 =====
@@ -832,7 +1026,9 @@ class FunClipStyleProcessor:
             response = self.llm_manager.current_provider.call(
                 FUNCLIP_MERGED_PROMPT,
                 "这是待分析剪辑的直播srt字幕：\n" + enhanced_text,
-                max_tokens=8192
+                max_tokens=16384,
+                temperature=0,  # temperature=0 固定输出，确保同输入同结果
+                seed=42  # 固定随机种子，配合temperature=0保证完全确定性
             )
 
             if not response or not response.content:
@@ -857,6 +1053,69 @@ class FunClipStyleProcessor:
                 logger.warning("合并方案未能解析出片段，使用降级方案")
                 return self._fallback_process(srt_text)
 
+            # 检查 LLM 是否返回置信度信息（boundary_confidence / segments[].confidence）
+            # 若缺失或平均 boundary_confidence 过低，则认为 merged 不可靠，降级为 three_step
+            try:
+                # 计算每个 clip 的 boundary_confidence：优先使用顶层 boundary_confidence，
+                # 否则用 segments[].confidence 的时长加权平均作为备选值。
+                total_bc = 0.0
+                bc_count = 0
+                any_seg_conf_found = False
+                for c in merged_clips:
+                    # 默认使用顶层 boundary_confidence（若存在且非空）
+                    bc_val = None
+                    if 'boundary_confidence' in c and c.get('boundary_confidence') is not None:
+                        try:
+                            bc_val = float(c.get('boundary_confidence') or 0.0)
+                        except Exception:
+                            bc_val = None
+
+                    # 如果顶层缺失，则尝试用 segments[].confidence 的时长加权平均作为备用
+                    if bc_val is None:
+                        segs = c.get('segments', []) or []
+                        weighted_sum = 0.0
+                        total_dur = 0.0
+                        seg_conf_found = False
+                        for seg in segs:
+                            if 'confidence' in seg:
+                                try:
+                                    conf = float(seg.get('confidence') or 0.0)
+                                except Exception:
+                                    conf = 0.0
+                                s = _srt_time_to_seconds(seg['start'])
+                                e = _srt_time_to_seconds(seg['end'])
+                                dur = max(0.001, e - s)
+                                weighted_sum += conf * dur
+                                total_dur += dur
+                                seg_conf_found = True
+                        if seg_conf_found and total_dur > 0:
+                            bc_val = weighted_sum / total_dur
+                            any_seg_conf_found = True
+                    else:
+                        # 顶层存在则认为该 clip 有置信度信息
+                        any_seg_conf_found = True
+
+                    # 最终归一化为 0.0~1.0 范围数值
+                    bc = float(bc_val or 0.0)
+                    total_bc += bc
+                    bc_count += 1
+
+                avg_bc = (total_bc / bc_count) if bc_count else 0.0
+                MIN_AVG_BOUNDARY_CONFIDENCE = 0.35
+
+                # 只在所有 clip 都没有任何置信度信息时视为缺失（需要回退）；
+                # 否则用计算出的 avg_bc 判断是否回退
+                if (not any_seg_conf_found) or (avg_bc < MIN_AVG_BOUNDARY_CONFIDENCE):
+                    logger.warning(
+                        "合并方案输出缺少置信度字段或平均 boundary_confidence=%.3f < %.3f，退回 three_step",
+                        avg_bc,
+                        MIN_AVG_BOUNDARY_CONFIDENCE,
+                    )
+                    return self._llm_process_three_step(srt_text)
+            except Exception as e:
+                logger.warning(f"检测合并方案置信度信息失败: {e}，退回 three_step")
+                return self._llm_process_three_step(srt_text)
+
             # 校验recommend_reason是否所有片段相同（照抄示例的典型表现）
             if len(merged_clips) >= 2:
                 reasons = [c.get('recommend_reason', '') for c in merged_clips]
@@ -869,11 +1128,35 @@ class FunClipStyleProcessor:
             logger.info("开始跨clip去重...")
             merged_clips = _deduplicate_clip_segments(merged_clips)
             logger.info(f"去重后保留 {len(merged_clips)} 个片段")
-
             # SRT时间戳验证：修正边界 + 填充间隙 + 标记内部静音
             logger.info("开始SRT时间戳验证（修正LLM边界 + 填充间隙 + 剔除静音）...")
-            merged_clips = postprocess_funclip_topics(merged_clips, srt_text)
+
+            # 解析 VAD/ASR 输入（如果提供）
+            vad_silences = None
+            asr_conf_map = None
+            try:
+                if vad_path and vad_path.exists():
+                    vad_text = vad_path.read_text(encoding='utf-8')
+                    vad_entries = _parse_srt_timeline(vad_text)
+                    vad_silences = []
+                    for i in range(len(vad_entries)-1):
+                        gap = vad_entries[i+1]['start'] - vad_entries[i]['end']
+                        if gap > 0:
+                            vad_silences.append((vad_entries[i]['end'], vad_entries[i+1]['start']))
+                if asr_path and asr_path.exists():
+                    # 目前ASR SRT不包含置信度，保留接口以便未来解析
+                    asr_conf_map = {}
+            except Exception as e:
+                logger.warning(f"解析 VAD/ASR 输入失败: {e}")
+
+            merged_clips = postprocess_funclip_topics(merged_clips, srt_text, vad_silences=vad_silences, asr_conf_map=asr_conf_map)
             logger.info(f"SRT验证与时长校验完成")
+
+            # 对短片段应用保留策略：仅保留高置信短片段；对置信处于边界的短片段，调用二次LLM确认
+            try:
+                merged_clips = _apply_short_segment_policy(self, merged_clips, srt_text)
+            except Exception as e:
+                logger.warning(f"短片段保留策略执行失败: {e}")
 
             # 输出详细分组日志：每个话题的segments、字幕内容、归类原因
             _log_topic_details(merged_clips, srt_text)
@@ -911,11 +1194,21 @@ class FunClipStyleProcessor:
             chunks = preprocessor.generate_semantic_chunks(srt_entries)
             text_corrector = TextCorrector()
             enhanced_chunks = []
+            meta_records = []
             for chunk in chunks:
                 corrected_text, corrections, confidence = text_corrector.correct_text(chunk['text'])
                 enhanced_chunks.append(
                     f"[{chunk['start_str']} --> {chunk['end_str']}]\n{corrected_text}"
                 )
+
+                meta_records.append({
+                    'start_str': chunk.get('start_str'),
+                    'end_str': chunk.get('end_str'),
+                    'original_text': chunk.get('text'),
+                    'corrected_text': corrected_text,
+                    'corrections': corrections,
+                    'confidence': confidence
+                })
 
             enhanced_text = "\n\n".join(enhanced_chunks)
             try:
@@ -925,6 +1218,15 @@ class FunClipStyleProcessor:
                 logger.info(f"预处理结果已保存到: {debug_path}")
             except Exception as e:
                 logger.warning(f"保存 Step1 预处理文本失败: {e}")
+
+            # 写入纠错元数据文件（可用于回溯和分析）
+            try:
+                meta_path = self.metadata_dir / "step1_preprocessed_meta.json"
+                with open(meta_path, 'w', encoding='utf-8') as mf:
+                    json.dump(meta_records, mf, ensure_ascii=False, indent=2)
+                logger.info(f"预处理纠错元数据已保存到: {meta_path}")
+            except Exception as e:
+                logger.warning(f"保存 Step1 预处理元数据失败: {e}")
 
             return enhanced_text
         except Exception as e:
@@ -1312,8 +1614,24 @@ class FunClipStyleProcessor:
             """移除JSON中数组/对象末尾的逗号（LLM常见错误）"""
             return re.sub(r',\s*([\]}])', r'\1', json_str)
 
+        def _filter_valid_segments(segments: List[Dict]) -> List[Dict]:
+            """过滤掉零时长和重复的segments，保留有效段"""
+            if not segments:
+                return []
+            seen = set()
+            valid = []
+            for seg in segments:
+                start = seg.get('start', '')
+                end = seg.get('end', '')
+                if start and end and start != end:
+                    key = (start, end)
+                    if key not in seen:
+                        seen.add(key)
+                        valid.append(seg)
+            return valid
+
         def _try_parse(json_str: str) -> Optional[List[Dict]]:
-            """尝试解析JSON，包含尾部逗号修复"""
+            """尝试解析JSON，包含尾部逗号修复和零时长segment过滤"""
             if not json_str:
                 return None
             try:
@@ -1321,17 +1639,52 @@ class FunClipStyleProcessor:
                 if isinstance(data, list):
                     result = []
                     for i, item in enumerate(data):
-                        if 'segments' in item and isinstance(item['segments'], list) and len(item['segments']) > 0:
-                            item['id'] = str(item.get('id', i + 1))
-                            result.append(item)
+                        if 'segments' in item and isinstance(item['segments'], list):
+                            valid_segs = _filter_valid_segments(item['segments'])
+                            if valid_segs:
+                                item['segments'] = valid_segs
+                                item['id'] = str(item.get('id', i + 1))
+                                result.append(item)
                     if result:
                         return result
             except json.JSONDecodeError:
                 pass
             return None
 
+        def _try_fix_and_parse(extracted: str) -> Optional[List[Dict]]:
+            """尝试修复截断的JSON并解析"""
+            # 先尝试直接解析
+            result = _try_parse(extracted)
+            if result:
+                return result
+            # 去掉代码块标记
+            cleaned = re.sub(r'```(?:json)?\s*\n?', '', extracted).strip()
+            if cleaned != extracted:
+                result = _try_parse(cleaned)
+                if result:
+                    return result
+                extracted = cleaned
+            # 如果是截断的JSON，找到最后一个完整的对象/数组，截断并补齐括号
+            for trim_char in ['}', ']']:
+                last_complete = extracted.rfind(trim_char)
+                if last_complete >= 0:
+                    trimmed = extracted[:last_complete + 1]
+                    if extracted.count('[') > trimmed.count(']'):
+                        open_count = extracted.count('[') - trimmed.count(']')
+                        for _ in range(open_count):
+                            trimmed += ']'
+                    if extracted.count('{') > trimmed.count('}'):
+                        open_count = extracted.count('{') - trimmed.count('}')
+                        for _ in range(open_count):
+                            trimmed += '}'
+                    result = _try_parse(trimmed)
+                    if result:
+                        logger.info(f"通过截断并补齐括号修复截断JSON成功，共 {len(result)} 个片段")
+                        return result
+            return None
+
         # 1. 直接解析（纯JSON，无多余文字）
-        result = _try_parse(response_text)
+        result = _try_fix_and_parse(response_text)
         if result:
             logger.info(f"JSON解析成功，共 {len(result)} 个片段")
             return result
@@ -1340,17 +1693,19 @@ class FunClipStyleProcessor:
         for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response_text):
             start = block.find('[')
             end = block.rfind(']')
-            if start >= 0 and end > start:
-                result = _try_parse(block[start:end + 1])
-                if result:
-                    logger.info(f"从代码块解析JSON成功，共 {len(result)} 个片段")
-                    return result
+            extract = block[start:] if start >= 0 else block
+            if end > start:
+                extract = block[start:end + 1]
+            result = _try_fix_and_parse(extract)
+            if result:
+                logger.info(f"从代码块解析JSON成功，共 {len(result)} 个片段")
+                return result
 
         # 3. 从文本中直接查找JSON数组（忽略前后文字）
         start_idx = response_text.find('[')
-        end_idx = response_text.rfind(']')
-        if start_idx >= 0 and end_idx > start_idx:
-            result = _try_parse(response_text[start_idx:end_idx + 1])
+        if start_idx >= 0:
+            extract = response_text[start_idx:]
+            result = _try_fix_and_parse(extract)
             if result:
                 logger.info(f"从文本提取JSON成功，共 {len(result)} 个片段")
                 return result
@@ -1369,9 +1724,9 @@ class FunClipStyleProcessor:
         if json_candidates:
             candidate_text = '\n'.join(json_candidates)
             start_idx = candidate_text.find('[')
-            end_idx = candidate_text.rfind(']')
-            if start_idx >= 0 and end_idx > start_idx:
-                result = _try_parse(candidate_text[start_idx:end_idx + 1])
+            if start_idx >= 0:
+                extract = candidate_text[start_idx:]
+                result = _try_fix_and_parse(extract)
                 if result:
                     logger.info(f"从逐行提取解析JSON成功，共 {len(result)} 个片段")
                     return result
@@ -1379,11 +1734,9 @@ class FunClipStyleProcessor:
         logger.warning(f"无法解析合并方案响应，原始响应长度: {len(response_text)}")
         logger.warning(f"响应内容(前1000): {response_text[:1000]}")
         logger.warning(f"响应内容(最后200): {response_text[-200:]}")
-        # 检查响应中是否包含JSON的关键标记
-        has_bracket = '[' in response_text and ']' in response_text
         has_code_block = '```' in response_text
         has_segments = '"segments"' in response_text
-        logger.warning(f"解析诊断: 方括号={has_bracket}, 代码块={has_code_block}, segments字段={has_segments}")
+        logger.warning(f"解析诊断: 代码块={has_code_block}, segments字段={has_segments}")
         return merged_clips
     
     def _parse_clips_only(self, response: str) -> List[Dict]:

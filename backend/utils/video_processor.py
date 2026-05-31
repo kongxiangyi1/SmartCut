@@ -196,13 +196,17 @@ class VideoProcessor:
             ffmpeg_duration = f"{duration:.3f}"
 
             # 构建帧精确的FFmpeg命令：使用 -ss AFTER -i 保证帧精确，使用 -t 指定持续时长
-            # 使用流复制以提高短片段的稳定性和速度；如需转码再改回编码参数
+            # 使用重新编码以确保帧精确切割，避免 -c copy 导致的关键帧对齐问题（画面静止）
             cmd = [
                 'ffmpeg',
                 '-i', str(input_video),
                 '-ss', ffmpeg_start_time,
                 '-t', ffmpeg_duration,
-                '-c', 'copy',
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-c:a', 'aac',
+                '-b:a', '192k',
                 '-y',
                 str(output_path)
             ]

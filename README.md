@@ -1,6 +1,6 @@
-# AutoClip - AI视频智能切片系统
+# SmartCut - AI视频智能切片系统
 
-![AutoClip Logo](https://img.shields.io/badge/AutoClip-AI%20Video%20Processing-blue?style=for-the-badge&logo=video)
+![SmartCut Logo](https://img.shields.io/badge/SmartCut-AI%20Video%20Processing-blue?style=for-the-badge&logo=video)
 
 ## 基于AI的智能视频切片处理系统
 
@@ -13,18 +13,18 @@
 [![Celery](https://img.shields.io/badge/Celery-Latest-green?style=flat&logo=celery)](https://celeryproject.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat)](LICENSE)
 
-[![GitHub stars](https://img.shields.io/badge/Stars-0-blue?style=social)](https://github.com/zhouxiaoka/autoclip)
-[![GitHub forks](https://img.shields.io/badge/Forks-0-blue?style=social)](https://github.com/zhouxiaoka/autoclip)
-[![GitHub issues](https://img.shields.io/badge/Issues-0-blue)](https://github.com/zhouxiaoka/autoclip/issues)
+[![Gitee stars](https://img.shields.io/badge/Stars-0-blue?style=social)](https://gitee.com/kongxy2019/smart-cut)
+[![Gitee forks](https://img.shields.io/badge/Forks-0-blue?style=social)](https://gitee.com/kongxy2019/smart-cut)
+[![Gitee issues](https://img.shields.io/badge/Issues-0-blue)](https://gitee.com/kongxy2019/smart-cut/issues)
 
 **语言**: [English](README-EN.md) | [中文](README.md)  
-**联系邮箱**: [christine_zhouye@163.com](mailto:christine_zhouye@163.com)
+**联系邮箱**: [kxy_1@163.com](mailto:kxy_1@163.com)
 
 </div>
 
 ## 🎯 项目简介
 
-AutoClip是一个基于AI的智能视频切片处理系统，能够自动从YouTube、B站等平台下载视频，通过AI分析提取精彩片段，并智能生成合集。系统采用现代化的前后端分离架构，提供直观的Web界面和强大的后端处理能力。
+SmartCut是一个基于AI的智能视频切片处理系统，能够自动从YouTube、B站等平台下载视频，通过AI分析提取精彩片段，并智能生成合集。系统采用现代化的前后端分离架构，提供直观的Web界面和强大的后端处理能力。
 
 **联系方式**: [christine_zhouye@163.com](mailto:christine_zhouye@163.com)
 
@@ -111,8 +111,8 @@ graph TB
 
 ```bash
 # 克隆项目
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+git clone https://gitee.com/kongxy2019/smart-cut.git
+cd smart-cut
 
 # Docker一键启动
 ./docker-start.sh
@@ -131,20 +131,20 @@ cd autoclip
 
 ```bash
 # 克隆项目
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+git clone https://gitee.com/kongxy2019/smart-cut.git
+cd smart-cut
 
 # 一键启动（推荐，包含完整检查和监控）
-./start_autoclip.sh
+./start_smartcut.sh
 
 # 快速启动（开发环境，跳过详细检查）
 ./quick_start.sh
 
 # 检查系统状态
-./status_autoclip.sh
+./status_smartcut.sh
 
 # 停止系统
-./stop_autoclip.sh
+./stop_smartcut.sh
 ```
 
 ### 手动安装
@@ -281,7 +281,7 @@ cp env.example .env
 
 ```bash
 # 数据库配置
-DATABASE_URL=sqlite:///./data/autoclip.db
+DATABASE_URL=sqlite:///./data/smartcut.db
 
 # Redis配置
 REDIS_URL=redis://localhost:6379/0
@@ -312,7 +312,7 @@ PROJECT_DIR=./data/projects
 ## 📁 项目结构
 
 ```text
-autoclip/
+smartcut/
 ├── backend/                 # 后端代码
 │   ├── api/                # API路由
 │   │   ├── v1/            # API v1版本
@@ -367,11 +367,11 @@ autoclip/
 │   ├── uploads/           # 上传文件
 │   ├── temp/              # 临时文件
 │   ├── output/            # 输出文件
-│   └── autoclip.db        # 数据库文件
+│   └── smartcut.db        # 数据库文件
 ├── scripts/               # 工具脚本
-│   ├── start_autoclip.sh  # 启动脚本
-│   ├── stop_autoclip.sh   # 停止脚本
-│   └── status_autoclip.sh # 状态检查
+│   ├── start_smartcut.sh  # 启动脚本
+│   ├── stop_smartcut.sh   # 停止脚本
+│   └── status_smartcut.sh # 状态检查
 ├── docs/                  # 文档
 │   ├── README.md          # 文档中心
 │   ├── i18n.md           # 国际化配置
@@ -464,7 +464,7 @@ tail -f logs/celery.log     # 任务队列日志
 
 ```bash
 # 详细状态检查
-./status_autoclip.sh
+./status_smartcut.sh
 
 # 手动检查服务
 curl http://localhost:8000/api/v1/health/  # 后端健康检查
@@ -595,18 +595,18 @@ docker-compose -f docker-compose.dev.yml logs -f
 
 ```bash
 # 创建systemd服务文件
-sudo nano /etc/systemd/system/autoclip.service
+sudo nano /etc/systemd/system/smartcut.service
 
 [Unit]
-Description=AutoClip Video Processing System
+Description=SmartCut Video Processing System
 After=network.target redis.service
 
 [Service]
 Type=forking
-User=autoclip
-WorkingDirectory=/opt/autoclip
-ExecStart=/opt/autoclip/start_autoclip.sh
-ExecStop=/opt/autoclip/stop_autoclip.sh
+User=smartcut
+WorkingDirectory=/opt/smartcut
+ExecStart=/opt/smartcut/start_smartcut.sh
+ExecStop=/opt/smartcut/stop_smartcut.sh
 Restart=always
 
 [Install]
@@ -638,12 +638,12 @@ WantedBy=multi-user.target
 
 ### 如何贡献
 
-1. **Fork** 项目到您的GitHub账户
+1. **Fork** 项目到您的Gitee账户
 2. 克隆您的Fork到本地：
 
    ```bash
-   git clone https://github.com/zhouxiaoka/autoclip.git
-   cd autoclip
+   git clone https://gitee.com/kongxy2019/smart-cut.git
+   cd smart-cut
    ```
 
 3. 创建功能分支：
@@ -805,10 +805,10 @@ A:
 
 ### 获取帮助
 
-- **问题反馈**: [GitHub Issues](https://github.com/zhouxiaoka/autoclip/issues)
-- **功能建议**: [GitHub Discussions](https://github.com/zhouxiaoka/autoclip/discussions)
+- **问题反馈**: [Gitee Issues](https://gitee.com/kongxy2019/smart-cut/issues)
+- **功能建议**: [Gitee Issues](https://gitee.com/kongxy2019/smart-cut/issues)
   (仓库创建后可用)
-- **Bug报告**: 请使用GitHub Issues模板
+- **Bug报告**: 请使用Gitee Issues模板
 - **文档**: [项目文档](docs/)
 
 ### 联系方式
@@ -825,8 +825,8 @@ A:
 
 ### 📧 其他联系方式
 
-- 提交 [GitHub Issue](https://github.com/zhouxiaoka/autoclip/issues)
-- 发送邮件至：[christine_zhouye@163.com](mailto:christine_zhouye@163.com)
+- 提交 [Gitee Issue](https://gitee.com/kongxy2019/smart-cut/issues)
+- 发送邮件至：[kxy_1@163.com](mailto:kxy_1@163.com)
 - 添加上述QQ或飞书联系
 
 ## 🙏 致谢
@@ -868,8 +868,8 @@ A:
 
 ## 如果这个项目对你有帮助，请给我们一个 ⭐ Star
 
-[![Star History Chart](https://api.star-history.com/svg?repos=zhouxiaoka/autoclip&type=Date)](https://star-history.com/#zhouxiaoka/autoclip&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=kongxy2019/smart-cut&type=Date)](https://star-history.com/#kongxy2019/smart-cut&Date)
 
-Made with ❤️ by AutoClip Team
+Made with ❤️ by SmartCut Team
 
 ⭐ 如果觉得有用，请给个Star支持一下！

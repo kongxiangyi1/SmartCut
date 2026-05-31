@@ -344,6 +344,8 @@ def validate_segments_with_srt(
     merged_clips: List[Dict],
     srt_text: str,
     silence_threshold: float = 2.0,
+    vad_silences: Optional[List[Tuple[float, float]]] = None,
+    asr_conf_map: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     entries = parse_srt_timeline(srt_text)
     if not entries:
@@ -360,12 +362,23 @@ def validate_segments_with_srt(
         validated_segments = []
         all_removed = clip.get('removed_sections', [])
 
+        # 当段落没有显式置信度时，基于SRT密度估算一个段置信度：每秒字幕条目数映射到[0,1]
+        def _estimate_seg_conf(seg_start, seg_end):
+            dur = max(0.001, seg_end - seg_start)
+            cnt = sum(1 for e in entries if e['start'] >= seg_start and e['end'] <= seg_end)
+            density = cnt / dur  # 条/秒
+            # map density 0~0.5+ to 0~1（经验值）
+            conf = min(1.0, density * 1.0)
+            return conf
+
         for seg in segments:
+
             seg_start = srt_time_to_seconds(seg.get('start', '00:00:00,000'))
             seg_end = srt_time_to_seconds(seg.get('end', '00:00:00,000'))
             contained = [e for e in entries if e['start'] >= seg_start and e['end'] <= seg_end]
 
             if not contained:
+                # 没有完全包含的SRT条目，尝试寻找部分重叠条目
                 overlapping = [
                     e for e in entries if e['start'] < seg_end and e['end'] > seg_start
                 ]
@@ -376,19 +389,57 @@ def validate_segments_with_srt(
                     seg_end = max(seg_end, last['end'])
                     contained = overlapping
                 else:
-                    all_removed.append({
-                        'start': seg['start'],
-                        'end': seg['end'],
-                        'reason': '该时间范围内无字幕（纯静音）',
-                    })
-                    continue
+                    # 没有任何字幕覆盖。若VAD存在并在该区间检测到语音，则保留并标记为低置信
+                    has_voice = False
+                    if vad_silences is not None:
+                        # 若VAD静音段与该区间无覆盖，说明有语音
+                        overlap_with_silence = any(
+                            not (seg_end <= s_start or seg_start >= s_end)
+                            for s_start, s_end in vad_silences
+                        )
+                        has_voice = not overlap_with_silence
+
+                    # ASR置信度判断（按所在chunk id或近似映射）
+                    asr_conf = None
+                    try:
+                        asr_conf = asr_conf_map.get(int(seg.get('id'))) if asr_conf_map else None
+                    except Exception:
+                        asr_conf = None
+
+                    est_conf = asr_conf if asr_conf is not None else _estimate_seg_conf(seg_start, seg_end)
+
+                    if has_voice or est_conf >= 0.5:
+                        # 保留段，但标注为低置信并记录原因
+                        clip.setdefault('removed_sections', [])
+                        clip.setdefault('low_confidence_segments', []).append({
+                            'start': seg.get('start'),
+                            'end': seg.get('end'),
+                            'reason': '无SRT但VAD/ASR或密度支持'
+                        })
+                        validated_start = seg_start
+                        validated_end = seg_end
+                    else:
+                        all_removed.append({
+                            'start': seg['start'],
+                            'end': seg['end'],
+                            'reason': '该时间范围内无字幕（纯静音）',
+                        })
+                        continue
 
             validated_start = contained[0]['start']
             validated_end = contained[-1]['end']
 
             for i in range(len(contained) - 1):
                 gap = contained[i + 1]['start'] - contained[i]['end']
-                if gap > silence_threshold:
+                # silence_threshold 可来自参数或全局配置
+                use_threshold = silence_threshold
+                try:
+                    from backend.core.shared_config import config_manager
+                    use_threshold = getattr(config_manager.settings, 'silence_threshold', silence_threshold)
+                except Exception:
+                    pass
+
+                if gap > use_threshold:
                     all_removed.append({
                         'start': seconds_to_srt_time(contained[i]['end']),
                         'end': seconds_to_srt_time(contained[i + 1]['start']),
@@ -422,6 +473,52 @@ def validate_segments_with_srt(
                     del validated_segments[i + 1]
                 else:
                     i += 1
+
+        # 额外启发式：避免在句子/语义未完结时切分（如下一条字幕为承接词/因果/承前），
+        # 将紧接的短承接性字幕合并到当前 segment 中，直到不再满足承接条件。
+        if entries:
+            cont_markers = (
+                '因为','所以','然后','接着','并且','而且','那你','那就','刚才','刚刚',
+                '接下来','另外','继续','还有','并说','就是说','而','但','不过','如果','可是','就','还'
+            )
+            def _starts_with_marker(text: str) -> bool:
+                t = (text or '').strip()
+                for m in cont_markers:
+                    if t.startswith(m):
+                        return True
+                return False
+
+            # for each validated segment, try to extend to include immediate following entries if they are continuation
+            for vi, vseg in enumerate(validated_segments):
+                v_start = srt_time_to_seconds(vseg['start'])
+                v_end = srt_time_to_seconds(vseg['end'])
+                # find last fully contained entry index
+                last_idx = None
+                for idx, e in enumerate(entries):
+                    if e['start'] >= v_start and e['end'] <= v_end:
+                        last_idx = idx
+                if last_idx is None:
+                    # find first overlapping
+                    for idx, e in enumerate(entries):
+                        if e['start'] < v_end and e['end'] > v_start:
+                            last_idx = idx
+                            break
+                # try to extend
+                while last_idx is not None and last_idx + 1 < len(entries):
+                    nxt = entries[last_idx + 1]
+                    # short continuation candidate: very short or starts with marker
+                    nxt_text = nxt.get('text', '').strip()
+                    nxt_dur = nxt['end'] - nxt['start']
+                    # 如果下一条以承接词开头或很短（可能是衔接/残句）则合并；
+                    # 或者上一条字幕未以句号/问号/感叹号结尾，可能是未完结句子，也合并
+                    prev_text = entries[last_idx].get('text', '') if last_idx is not None else ''
+                    prev_ends_sentence = bool(prev_text.strip() and prev_text.strip()[-1] in ('。', '！', '？', '!','?'))
+                    if _starts_with_marker(nxt_text) or nxt_dur <= 3.0 or (not prev_ends_sentence):
+                        # extend
+                        vseg['end'] = seconds_to_srt_time(nxt['end'])
+                        last_idx += 1
+                    else:
+                        break
 
         clip['segments'] = validated_segments if validated_segments else segments
 
@@ -528,15 +625,25 @@ def merge_cross_boundary_topics(timeline_data: List[Dict]) -> List[Dict]:
             time_gap = next_start - current_end
             should_merge = False
 
-            if current_chunk != next_chunk and -2 <= time_gap < 30:
-                if titles_similar > 0.5:
+            if current_chunk != next_chunk and -2 <= time_gap < 60:
+                # loosen合并阈值：增加关键词重叠判定与更宽的时间窗口
+                if titles_similar > 0.45:
                     should_merge = True
-                elif titles_similar > 0.3 and time_gap < 10:
+                elif titles_similar > 0.3 and time_gap < 20:
                     should_merge = True
                 elif current_title in next_title or next_title in current_title:
                     should_merge = True
                 elif time_gap < 5:
                     should_merge = True
+                else:
+                    # 关键词重叠检查（补充判定）
+                    cur_keys = set(_extract_keywords(current.get('outline', '')))
+                    next_keys = set(_extract_keywords(next_item.get('outline', '')))
+                    if cur_keys and next_keys:
+                        inter = len(cur_keys & next_keys)
+                        union = len(cur_keys | next_keys)
+                        if union > 0 and (inter / union) > 0.25 and time_gap < 120:
+                            should_merge = True
 
             if should_merge:
                 merged_topic = current.copy()
@@ -568,6 +675,22 @@ def validate_funclip_topic_durations(topics: List[Dict]) -> List[Dict]:
         duration = compute_segments_duration_seconds(topic.get('segments', []))
         label = topic.get('outline') or topic.get('title') or topic.get('id', '未知')
 
+        # 若被标记为 product，但经检索其实际文本内容不含产品相关关键词，则去掉 product 标记
+        try:
+            entries = []
+            # 收集该topic的字幕文本用于关键词检测
+            from backend.pipeline.topic_postprocess import parse_srt_timeline as _ppt_parse
+        except Exception:
+            entries = []
+        product_keywords = ('产品', '购买', '下单', '链接', '价格', '优惠', '折扣', '包邮', '买', '促销', '手表', '牛肉丸', '鸡肉丸')
+        topic_text = str(topic.get('outline', '')) + ' ' + ' '.join(
+            [s.get('text', '') for s in topic.get('segments', []) if isinstance(s, dict)]
+        )
+        product_like_actual = any(k in topic_text for k in product_keywords)
+        if str(topic.get('topic_type', '')).lower() == 'product' and not product_like_actual:
+            logger.info("话题 '%s' 标记为 product 但内容不含产品关键词，移除 product 标注", label)
+            topic['topic_type'] = ''
+
         # 判断是否需要跳过时长限制（产品或特定话题类型无需时长限制）
         try:
             from backend.core.shared_config import NO_DURATION_LIMIT_TYPES
@@ -581,15 +704,15 @@ def validate_funclip_topic_durations(topics: List[Dict]) -> List[Dict]:
         exempt_type = topic_type in NO_DURATION_LIMIT_TYPES
 
         if not (exempt_type or product_like):
-            # 非免限类型：应用最小/最大时长规则
+            # 非免限类型：不再因时长过短而直接过滤，改为记录警告并按内容保留。
             if duration < min_seconds:
-                logger.warning(
-                    "FunClip 话题 '%s' 时长 %.1fs 低于最小值 %.1fs，已过滤",
+                topic['duration_warning'] = 'too_short'
+                logger.info(
+                    "FunClip 话题 '%s' 时长 %.1fs 低于最小值 %.1fs，但按话题内容保留",
                     label,
                     duration,
                     min_seconds,
                 )
-                continue
 
             if duration > max_seconds:
                 topic['duration_warning'] = 'too_long'
@@ -645,8 +768,13 @@ def validate_timeline_durations(timeline_data: List[Dict]) -> List[Dict]:
     return validated
 
 
-def postprocess_funclip_topics(topics: List[Dict], srt_text: str) -> List[Dict]:
-    topics = validate_segments_with_srt(topics, srt_text)
+def postprocess_funclip_topics(
+    topics: List[Dict],
+    srt_text: str,
+    vad_silences: Optional[List[Tuple[float, float]]] = None,
+    asr_conf_map: Optional[Dict[int, float]] = None,
+) -> List[Dict]:
+    topics = validate_segments_with_srt(topics, srt_text, vad_silences=vad_silences, asr_conf_map=asr_conf_map)
     return validate_funclip_topic_durations(topics)
 
 
