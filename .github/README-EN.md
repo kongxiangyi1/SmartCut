@@ -1,4 +1,4 @@
-# AutoClip - AutoClip: AI-Powered Video Highlight Tool
+# SmartCut - AI-Powered Video Highlight Tool
 
 Supporting YouTube/Bilibili video download, automatic clipping, and smart collection
 generation
@@ -10,9 +10,9 @@ generation
 [![Celery](https://img.shields.io/badge/Celery-Latest-green?style=flat&logo=celery)](https://celeryproject.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat)](LICENSE)
 
-[![GitHub stars](https://img.shields.io/badge/Stars-0-blue?style=social)](https://github.com/zhouxiaoka/autoclip)
-[![GitHub forks](https://img.shields.io/badge/Forks-0-blue?style=social)](https://github.com/zhouxiaoka/autoclip)
-[![GitHub issues](https://img.shields.io/badge/Issues-0-blue)](https://github.com/zhouxiaoka/autoclip/issues)
+[![GitHub stars](https://img.shields.io/badge/Stars-0-blue?style=social)](https://github.com/kongxiangyi1/SmartCut)
+[![GitHub forks](https://img.shields.io/badge/Forks-0-blue?style=social)](https://github.com/kongxiangyi1/SmartCut)
+[![GitHub issues](https://img.shields.io/badge/Issues-0-blue)](https://github.com/kongxiangyi1/SmartCut/issues)
 
 **Language**: [English](README-EN.md) | [中文](README.md)
 
@@ -20,7 +20,7 @@ generation
 
 ## 🎯 Project Overview
 
-AutoClip is an AI-powered intelligent video clipping system that can automatically
+SmartCut is an AI-powered intelligent video clipping system that can automatically
 download videos from YouTube, Bilibili, and other platforms, extract exciting clips
 through AI analysis, and intelligently generate collections. The system adopts a
 modern frontend-backend separation architecture, providing an intuitive web
@@ -119,8 +119,8 @@ graph TB
 
 ```bash
 # Clone the project
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+git clone https://github.com/kongxiangyi1/SmartCut.git
+cd SmartCut
 
 # Docker one-click startup
 ./docker-start.sh
@@ -139,20 +139,20 @@ cd autoclip
 
 ```bash
 # Clone the project
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+git clone https://github.com/kongxiangyi1/SmartCut.git
+cd SmartCut
 
 # One-click startup (recommended, includes complete checks and monitoring)
-./start_autoclip.sh
+./start_smartcut.sh
 
 # Quick startup (development environment, skips detailed checks)
 ./quick_start.sh
 
 # Check system status
-./status_autoclip.sh
+./status_smartcut.sh
 
 # Stop system
-./stop_autoclip.sh
+./stop_smartcut.sh
 ```
 
 ### Manual Installation
@@ -291,7 +291,7 @@ Create `.env` file:
 
 ```bash
 # Database configuration
-DATABASE_URL=sqlite:///./data/autoclip.db
+DATABASE_URL=sqlite:///./data/smartcut.db
 
 # Redis configuration
 REDIS_URL=redis://localhost:6379/0
@@ -323,7 +323,7 @@ PROJECT_DIR=./data/projects
 ## 📁 Project Structure
 
 ```text
-autoclip/
+smartcut/
 ├── backend/                 # Backend code
 │   ├── api/                # API routes
 │   │   ├── v1/            # API v1 version
@@ -378,11 +378,11 @@ autoclip/
 │   ├── uploads/           # Upload files
 │   ├── temp/              # Temporary files
 │   ├── output/            # Output files
-│   └── autoclip.db        # Database file
+│   └── smartcut.db        # Database file
 ├── scripts/               # Utility scripts
-│   ├── start_autoclip.sh  # Startup script
-│   ├── stop_autoclip.sh   # Stop script
-│   └── status_autoclip.sh # Status check
+│   ├── start_smartcut.sh  # Startup script
+│   ├── stop_smartcut.sh   # Stop script
+│   └── status_smartcut.sh # Status check
 ├── docs/                  # Documentation
 ├── logs/                  # Log files
 ├── Dockerfile             # Docker image build file
@@ -472,7 +472,7 @@ tail -f logs/celery.log     # Task queue logs
 
 ```bash
 # Detailed status check
-./status_autoclip.sh
+./status_smartcut.sh
 
 # Manual service check
 curl http://localhost:8000/api/v1/health/  # Backend health check
@@ -564,8 +564,8 @@ celery -A backend.core.celery_app flower --port=5555
 
 ```bash
 # Clone the project
-git clone https://github.com/zhouxiaoka/autoclip.git
-cd autoclip
+git clone https://github.com/kongxiangyi1/SmartCut.git
+cd SmartCut
 
 # Configure environment variables
 cp env.example .env
@@ -603,18 +603,18 @@ Complete Docker deployment guide please refer to [DOCKER.md](DOCKER.md) document
 
 ```bash
 # Create systemd service file
-sudo nano /etc/systemd/system/autoclip.service
+sudo nano /etc/systemd/system/smartcut.service
 
 [Unit]
-Description=AutoClip Video Processing System
+Description=SmartCut Video Processing System
 After=network.target redis.service
 
 [Service]
 Type=forking
-User=autoclip
-WorkingDirectory=/opt/autoclip
-ExecStart=/opt/autoclip/start_autoclip.sh
-ExecStop=/opt/autoclip/stop_autoclip.sh
+User=smartcut
+WorkingDirectory=/opt/SmartCut
+ExecStart=/opt/SmartCut/start_smartcut.sh
+ExecStop=/opt/SmartCut/stop_smartcut.sh
 Restart=always
 
 [Install]
@@ -652,8 +652,8 @@ documentation improvements, issue reports, or feature suggestions.
 2. Clone your Fork to local:
 
    ```bash
-   git clone https://github.com/zhouxiaoka/autoclip.git
-   cd autoclip
+   git clone https://github.com/kongxiangyi1/SmartCut.git
+   cd SmartCut
    ```
 
 3. Create feature branch:
@@ -814,8 +814,8 @@ A:
 
 ### Get Help
 
-- **Issue Reports**: [GitHub Issues](https://github.com/zhouxiaoka/autoclip/issues)
-- **Feature Suggestions**: [GitHub Discussions](https://github.com/zhouxiaoka/autoclip/discussions)
+- **Issue Reports**: [GitHub Issues](https://github.com/kongxiangyi1/SmartCut/issues)
+- **Feature Suggestions**: [GitHub Discussions](https://github.com/kongxiangyi1/SmartCut/discussions)
 - **Bug Reports**: Please use GitHub Issues template
 - **Documentation**: [Project Documentation](docs/)
 
@@ -833,8 +833,8 @@ For questions or suggestions, please contact us through:
 
 #### 📧 Other Contact Methods
 
-- Submit a [GitHub Issue](https://github.com/zhouxiaoka/autoclip/issues)
-- Send email to: [christine_zhouye@163.com](mailto:christine_zhouye@163.com)
+- Submit a [GitHub Issue](https://github.com/kongxiangyi1/SmartCut/issues)
+- Send email to: [kxy_1@163.com](mailto:kxy_1@163.com)
 - Add the above QQ or Feishu contact
 
 ## 📄 License
@@ -880,8 +880,8 @@ Thanks to the following open source projects and services:
 
 ## If this project helps you, please give us a ⭐ Star
 
-[![Star History Chart](https://api.star-history.com/svg?repos=zhouxiaoka/autoclip&type=Date)](https://star-history.com/#zhouxiaoka/autoclip&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=kongxiangyi1/SmartCut&type=Date)](https://star-history.com/#kongxiangyi1/SmartCut&Date)
 
-Made with ❤️ by AutoClip Team
+Made with ❤️ by SmartCut Team
 
 ⭐ If you find it useful, please give us a Star!
