@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 FUNCLIP_CLIP_ONLY_PROMPT = get_funclip_prompt('clip_only')
 FUNCLIP_TITLE_PROMPT = get_funclip_prompt('title')
 FUNCLIP_STEP1_BOUNDARY_PROMPT = get_funclip_prompt('step1_boundary')
+FUNCLIP_STEP1_5_GAPFILL_PROMPT = get_funclip_prompt('step1_5_gapfill')
 FUNCLIP_STEP2_BATCH_SCORE_PROMPT = get_funclip_prompt('step2_batch_score')
 FUNCLIP_STEP3_BATCH_TITLE_PROMPT = get_funclip_prompt('step3_batch_title')
 FUNCLIP_MERGED_PROMPT = get_funclip_prompt('merged')
@@ -459,6 +460,94 @@ def _convert_time_to_millis(time_str):
 
 
 # ============================================================
+# B2: Step2 智能截取工具
+# ============================================================
+
+def _find_boundary_line_indices(lines: List[str], segments: List[Dict]) -> List[int]:
+    boundary_idxs = set()
+    for seg in segments:
+        seg_start = _srt_time_to_seconds(seg['start'])
+        seg_end = _srt_time_to_seconds(seg['end'])
+        for i, line in enumerate(lines):
+            m = re.match(r'(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->', line)
+            if m:
+                t = _srt_time_to_seconds(m.group(1))
+                if abs(t - seg_start) < 5 or abs(t - seg_end) < 5:
+                    boundary_idxs.add(i)
+    return sorted(boundary_idxs)
+
+
+def _smart_truncate_srt_for_scoring(
+    srt_text: str,
+    segments: List[Dict],
+    *,
+    max_chars: int = 3000,
+    head_lines: int = 40,
+    tail_lines: int = 30,
+    boundary_window: int = 20,
+) -> str:
+    lines = srt_text.split('\n')
+    if len(srt_text) <= max_chars:
+        return srt_text
+
+    boundary_line_idxs = _find_boundary_line_indices(lines, segments)
+
+    selected = set(range(min(head_lines, len(lines))))
+    selected.update(range(max(0, len(lines) - tail_lines), len(lines)))
+    for bi in boundary_line_idxs:
+        selected.update(range(max(0, bi - boundary_window), min(len(lines), bi + boundary_window)))
+
+    ordered = sorted(selected)
+    result = []
+    prev = -2
+    for idx in ordered:
+        if idx > prev + 1:
+            result.append('...(省略)...')
+        result.append(lines[idx])
+        prev = idx
+    return '\n'.join(result)
+
+
+# ============================================================
+# B2: boundary_suggestion 工具 — _handle_add_segment
+# ============================================================
+
+def _handle_add_segment(
+    suggestion: str,
+    topic: Dict,
+    segments: List[Dict],
+    srt_entries: List[Dict]
+):
+    time_pairs = re.findall(
+        r'(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*[-~到至]\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})',
+        suggestion,
+    )
+    added = 0
+    for start_str, end_str in time_pairs:
+        start = _align_to_srt_start(
+            _srt_time_to_seconds(start_str.replace('.', ',')), srt_entries
+        )
+        end = _align_to_srt_end(
+            _srt_time_to_seconds(end_str.replace('.', ',')), srt_entries
+        )
+        if start is not None and end is not None and end > start:
+            segments.append({'start': _seconds_to_srt_time(start), 'end': _seconds_to_srt_time(end)})
+            added += 1
+    if added:
+        segments.sort(key=lambda s: _srt_time_to_seconds(s['start']))
+        topic['segments'] = _merge_overlapping_segments(segments)
+        logger.info(f"boundary_suggestion add_segment 应用完成: 话题{topic['id']} 新增{added}个segment")
+
+
+def _get_max_boundary_shift() -> float:
+    try:
+        from backend.core.shared_config import config_manager
+        return float(getattr(config_manager.settings, 'max_boundary_shift_seconds', 180.0))
+    except Exception:
+        return 180.0
+
+
+# ============================================================
 # 三步方案工具函数：boundary_suggestion 处理（P0修复3）
 # ============================================================
 
@@ -479,6 +568,7 @@ def _apply_boundary_suggestions(
     """
     applied_count = 0
     max_suggestions_per_topic = 2
+    max_shift = _get_max_boundary_shift()
 
     for score_item in scores:
         suggestion = score_item.get('boundary_suggestion')
@@ -518,6 +608,9 @@ def _apply_boundary_suggestions(
         elif '后移' in suggestion:
             _handle_shrink_start(suggestion, topic, segments, srt_entries)
 
+        elif '补 segment' in suggestion_lower or '新增 segment' in suggestion_lower or '添加 segment' in suggestion_lower:
+            _handle_add_segment(suggestion, topic, segments, srt_entries)
+
         else:
             logger.info(f"boundary_suggestion 格式无法解析，跳过: {suggestion[:100]}")
 
@@ -529,7 +622,8 @@ def _handle_extend_start(suggestion: str, topic: Dict, segments: List[Dict],
     time_match = re.search(r'(\d+)\s*秒', suggestion)
     extend_seconds = int(time_match.group(1)) if time_match else 10
 
-    if extend_seconds > 60:
+    max_shift = _get_max_boundary_shift()
+    if extend_seconds > max_shift:
         logger.warning(f"扩展建议偏移量过大({extend_seconds}秒)，可能是LLM幻觉，跳过")
         return
 
@@ -733,6 +827,118 @@ def _select_final_topics(
     for i, t in enumerate(kept):
         t['id'] = str(i + 1)
     return kept
+
+
+# ============================================================
+# B1: Step1.5 Gap Fill 工具函数
+# ============================================================
+
+def _get_step1_5_config() -> dict:
+    try:
+        from backend.core.shared_config import config_manager
+        s = config_manager.settings
+        return {
+            'enabled': bool(getattr(s, 'step1_5_enabled', True)),
+            'coverage_threshold': float(getattr(s, 'step1_5_coverage_threshold', 0.92)),
+            'confidence_threshold': float(getattr(s, 'step1_5_confidence_threshold', 0.75)),
+        }
+    except Exception:
+        return {'enabled': True, 'coverage_threshold': 0.92, 'confidence_threshold': 0.75}
+
+
+def _compute_topic_coverage_simple(
+    topics: List[Dict], srt_entries: List[Dict]
+) -> tuple:
+    if not topics or not srt_entries:
+        return 1.0, [], []
+
+    covered = set()
+    for topic in topics:
+        for seg in topic.get('segments', []):
+            seg_start = _srt_time_to_seconds(seg['start'])
+            seg_end = _srt_time_to_seconds(seg['end'])
+            for i, e in enumerate(srt_entries):
+                if e['start'] < seg_end and e['end'] > seg_start:
+                    covered.add(i)
+
+    orphans = [e for i, e in enumerate(srt_entries) if i not in covered]
+    ratio = len(covered) / len(srt_entries) if srt_entries else 1.0
+
+    gaps = []
+    if orphans:
+        orphans.sort(key=lambda e: e['start'])
+        g_start = orphans[0]['start']
+        g_end = orphans[0]['end']
+        g_list = [orphans[0]]
+        for e in orphans[1:]:
+            if e['start'] - g_end <= 2.0:
+                g_end = max(g_end, e['end'])
+                g_list.append(e)
+            else:
+                gaps.append({'start': g_start, 'end': g_end, 'entries': g_list})
+                g_start, g_end, g_list = e['start'], e['end'], [e]
+        gaps.append({'start': g_start, 'end': g_end, 'entries': g_list})
+
+    return ratio, orphans, gaps
+
+
+def _extract_gap_srt(
+    gap_start: float, gap_end: float, srt_entries: List[Dict]
+) -> str:
+    lines = []
+    for e in srt_entries:
+        if e['start'] >= gap_start and e['end'] <= gap_end:
+            start_str = e.get('start_str', _seconds_to_srt_time(e['start']))
+            end_str = e.get('end_str', _seconds_to_srt_time(e['end']))
+            text = e.get('text', '').strip()
+            if text:
+                lines.append(f"{start_str} --> {end_str}\n{text}")
+        elif e['start'] < gap_end and e['end'] > gap_start:
+            start_str = e.get('start_str', _seconds_to_srt_time(e['start']))
+            end_str = e.get('end_str', _seconds_to_srt_time(e['end']))
+            text = e.get('text', '').strip()
+            if text:
+                lines.append(f"{start_str} --> {end_str}\n{text}")
+    return '\n\n'.join(lines)
+
+
+def _merge_new_topics(
+    topics: List[Dict], actions: List[Dict], srt_entries: List[Dict]
+) -> List[Dict]:
+    for action in actions:
+        act = action.get('action', 'ignore')
+        if act == 'ignore':
+            continue
+        if act == 'create':
+            new_topic = action.get('new_topic', {})
+            if new_topic.get('outline'):
+                seg_start = _seconds_to_srt_time(_srt_time_to_seconds(new_topic.get('start', '0')))
+                seg_end = _seconds_to_srt_time(_srt_time_to_seconds(new_topic.get('end', '0')))
+                if seg_start and seg_end and seg_start != seg_end:
+                    next_id = str(len(topics) + 1)
+                    topics.append({
+                        'id': next_id,
+                        'outline': new_topic['outline'],
+                        'topic_type': new_topic.get('topic_type', 'daily'),
+                        'segments': [{'start': seg_start, 'end': seg_end}],
+                    })
+        elif act == 'merge_to':
+            target_id = action.get('target_topic_id')
+            gap_start = _srt_time_to_seconds(action.get('gap_start', '0').replace(',', '.'))
+            gap_end = _srt_time_to_seconds(action.get('gap_end', '0').replace(',', '.'))
+            for topic in topics:
+                if topic.get('id') == target_id:
+                    topic['segments'].append({
+                        'start': _seconds_to_srt_time(gap_start),
+                        'end': _seconds_to_srt_time(gap_end),
+                    })
+                    topic['segments'].sort(key=lambda s: _srt_time_to_seconds(s['start']))
+                    break
+
+    topics.sort(key=lambda t: _srt_time_to_seconds(t['segments'][0]['start']))
+    for i, t in enumerate(topics):
+        t['id'] = str(i + 1)
+    return topics
 
 
 # ============================================================
@@ -1305,12 +1511,7 @@ class FunClipStyleProcessor:
             if not segments:
                 continue
             srt_text = self._extract_srt_for_topic(segments, srt_entries)
-            if len(srt_text) > 2000:
-                srt_lines = srt_text.split('\n')
-                head_lines = srt_lines[:80]
-                tail_lines = srt_lines[-30:]
-                srt_text = '\n'.join(head_lines) + '\n...(中间省略)...\n' + '\n'.join(tail_lines)
-                logger.info(f"话题{topic['id']} SRT过长({len(srt_lines)}条)，截取首{len(head_lines)}+尾{len(tail_lines)}条")
+            srt_text = _smart_truncate_srt_for_scoring(srt_text, segments)
 
             total_duration = sum(
                 _srt_time_to_seconds(seg['end']) - _srt_time_to_seconds(seg['start'])
@@ -1556,6 +1757,74 @@ class FunClipStyleProcessor:
         logger.warning(f"无法解析 Step 3 响应: {response_text[:300]}")
         return []
 
+    def _step1_5_gapfill(self, step1_topics: List[Dict], srt_entries: List[Dict], srt_text: str) -> List[Dict]:
+        """Step 1.5 Gap Fill：覆盖率检查，调用LLM补洞"""
+        cfg = _get_step1_5_config()
+        if not cfg['enabled']:
+            return step1_topics
+
+        coverage_ratio, orphans, gaps = _compute_topic_coverage_simple(step1_topics, srt_entries)
+        logger.info(f"Step 1.5: 当前覆盖率 {coverage_ratio:.2%}, 未覆盖条目 {len(orphans)}, 空白区间 {len(gaps)}")
+
+        if coverage_ratio >= cfg['coverage_threshold'] or not gaps:
+            logger.info(f"Step 1.5: 覆盖率达标({coverage_ratio:.2%} >= {cfg['coverage_threshold']:.2%})，跳过补洞")
+            return step1_topics
+
+        logger.info(f"Step 1.5: 覆盖率不足({coverage_ratio:.2%} < {cfg['coverage_threshold']:.2%})，启动LLM补洞")
+
+        for gap in gaps:
+            gap_duration = gap['end'] - gap['start']
+            if gap_duration < 10.0:
+                logger.debug(f"Step 1.5: 空白区间过短({gap_duration:.1f}s < 10s)，跳过")
+                continue
+
+            gap_srt = _extract_gap_srt(gap['start'], gap['end'], gap['entries'])
+            if not gap_srt.strip():
+                continue
+
+            existing_topics_text = []
+            for t in step1_topics:
+                outline = t.get('outline', '').strip()
+                if outline:
+                    existing_topics_text.append(f"- {outline}")
+            existing_text = '\n'.join(existing_topics_text)
+
+            prompt = FUNCLIP_STEP1_5_GAPFILL_PROMPT.format(
+                gap_srt=gap_srt,
+                existing_topics=existing_text,
+                gap_start=f"{gap['start']:.2f}",
+                gap_end=f"{gap['end']:.2f}"
+            )
+
+            try:
+                response = self.llm.chat_one_turn(prompt, temperature=0.3)
+                parsed = None
+                for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response):
+                    try:
+                        parsed = json.loads(block.strip())
+                        break
+                    except:
+                        continue
+                if parsed is None:
+                    match = re.search(r'\[[\s\S]*\]', response)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group().strip())
+                        except:
+                            pass
+
+                if parsed and isinstance(parsed, list):
+                    step1_topics = _merge_new_topics(step1_topics, parsed, srt_entries)
+                    logger.info(f"Step 1.5: 空白区间合并后话题数: {len(step1_topics)}")
+                else:
+                    logger.debug(f"Step 1.5: LLM返回无法解析，跳过: {response[:200]}")
+
+            except Exception as e:
+                logger.warning(f"Step 1.5: LLM调用失败: {e}，跳过此区间")
+                continue
+
+        return step1_topics
+
     def _llm_process_three_step(self, srt_text: str):
         """三步流水线处理：边界识别 → 批量评分 → 批量标题（带检查点与降级）"""
         try:
@@ -1599,6 +1868,11 @@ class FunClipStyleProcessor:
                                          {'topic_count': len(step1_topics)})
 
             srt_entries = _parse_srt_timeline(srt_text)
+
+            # ==========================================
+            # Step 1.5: Gap Fill Pass（B1：LLM补洞）
+            # ==========================================
+            step1_topics = self._step1_5_gapfill(step1_topics, srt_entries, srt_text)
 
             # ==========================================
             # Step 2: 批量评分（带检查点 + boundary_suggestion）

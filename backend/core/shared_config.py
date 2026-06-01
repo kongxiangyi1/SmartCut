@@ -101,6 +101,7 @@ PROMPT_FILES = {
     "funclip_title": PROMPT_DIR / "funclip_title.txt",
     "funclip_step1_boundary": PROMPT_DIR / "funclip_step1_boundary.txt",
     "funclip_step2_batch_score": PROMPT_DIR / "funclip_step2_batch_score.txt",
+    "funclip_step1_5_gapfill": PROMPT_DIR / "funclip_step1_5_gapfill.txt",
     "funclip_step3_batch_title": PROMPT_DIR / "funclip_step3_batch_title.txt",
     "funclip_merged": PROMPT_DIR / "funclip_merged.txt",
 }
@@ -201,6 +202,13 @@ class Settings(BaseModel):
     max_forward_extend_entries: int = 5             # 收尾延伸最多向后看条目数
     topic_selection_min_score: float = 0.5          # 替代硬编码Top-6的最低分数
     topic_selection_hard_cap: int = 8               # 最大话题数上限
+    # 话题切分完整性改进 — 阶段B配置
+    step1_5_enabled: bool = True                    # B1: Step1.5 Gap Fill 开关
+    step1_5_coverage_threshold: float = 0.92        # 低于此覆盖率触发Step1.5
+    step1_5_confidence_threshold: float = 0.75      # 低于此置信度触发Step1.5
+    max_boundary_shift_seconds: float = 180.0       # B2: boundary_suggestion 最大偏移（原60s）
+    funclip_sub_mode: str = 'three_step'            # B3: 默认子模式
+    funclip_sub_mode_auto: bool = True              # B3: 长视频自动切换
     # 语音识别配置
     speech_recognition_method: str = "whisper_local"
     speech_recognition_language: str = "auto"

@@ -10,6 +10,7 @@ FUNCLIP_PROMPT_KEYS: Dict[str, str] = {
     'clip_only': 'funclip_clip_only',
     'title': 'funclip_title',
     'step1_boundary': 'funclip_step1_boundary',
+    'step1_5_gapfill': 'funclip_step1_5_gapfill',
     'step2_batch_score': 'funclip_step2_batch_score',
     'step3_batch_title': 'funclip_step3_batch_title',
     'merged': 'funclip_merged',

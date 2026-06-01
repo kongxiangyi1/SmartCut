@@ -31,7 +31,7 @@ class PipelineSelector:
 
     def __init__(self):
         self.mode = 'legacy'
-        self._funclip_sub_mode = 'two_stage'
+        self._funclip_sub_mode = 'three_step'  # B3: 默认使用三步流水线
         self.ab_test_ratio = 0.1
         self._load_mode()
 
