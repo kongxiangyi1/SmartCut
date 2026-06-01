@@ -22,6 +22,88 @@ logger = logging.getLogger(__name__)
 LONG_VIDEO_SRT_ENTRY_THRESHOLD = 600
 LONG_VIDEO_DURATION_SECONDS = 7200  # 2 小时
 
+# ---- 话题切分完整性改进 — 阶段A：辅助常量和函数 ----
+
+CONTINUATION_MARKERS = (
+    '因为', '所以', '然后', '接着', '并且', '而且', '那你', '那就',
+    '刚才', '刚刚', '接下来', '另外', '继续', '还有', '就是说',
+    '而', '但', '不过', '如果', '可是', '就', '还', '并说',
+)
+SENTENCE_END_CHARS = ('。', '！', '？', '!', '?', '…')
+
+
+def _starts_with_continuation(text: str) -> bool:
+    t = (text or '').strip()
+    return any(t.startswith(m) for m in CONTINUATION_MARKERS)
+
+
+def _ends_sentence(text: str) -> bool:
+    t = (text or '').strip()
+    return bool(t and t[-1] in SENTENCE_END_CHARS)
+
+
+def _gap_entries(entries: List[Dict], gap_start: float, gap_end: float) -> List[Dict]:
+    return [
+        e for e in entries
+        if e['start'] >= gap_start and e['end'] <= gap_end
+        and (e.get('text') or '').strip()
+    ]
+
+
+def _should_merge_adjacent_segments(
+    curr_end: float,
+    next_start: float,
+    gap_entries_list: List[Dict],
+    *,
+    silence_gap_max: float = 3.0,
+    continuation_gap_max: float = 3.0,
+) -> bool:
+    gap = next_start - curr_end
+
+    if gap <= 0:
+        return True
+
+    if not gap_entries_list:
+        return gap <= silence_gap_max
+
+    if gap > continuation_gap_max:
+        return False
+
+    return all(
+        _starts_with_continuation(e['text'])
+        or (e['end'] - e['start']) <= 3.0
+        for e in gap_entries_list
+    )
+
+
+def _merge_overlapping_segments(segments: List[Dict]) -> List[Dict]:
+    if len(segments) < 2:
+        return segments
+    sorted_segs = sorted(segments, key=lambda s: srt_time_to_seconds(s['start']))
+    merged = [dict(sorted_segs[0])]
+    for seg in sorted_segs[1:]:
+        prev = merged[-1]
+        prev_end = srt_time_to_seconds(prev['end'])
+        cur_start = srt_time_to_seconds(seg['start'])
+        cur_end = srt_time_to_seconds(seg['end'])
+        if cur_start <= prev_end:
+            prev['end'] = seconds_to_srt_time(max(prev_end, cur_end))
+        else:
+            merged.append(dict(seg))
+    return merged
+
+
+def _get_segment_merge_config() -> Dict[str, float]:
+    try:
+        from backend.core.shared_config import config_manager
+        s = config_manager.settings
+        return {
+            'silence_gap_max': float(getattr(s, 'segment_merge_silence_gap_max', 3.0)),
+            'continuation_gap_max': float(getattr(s, 'segment_merge_continuation_gap_max', 3.0)),
+        }
+    except Exception:
+        return {'silence_gap_max': 3.0, 'continuation_gap_max': 3.0}
+
 
 def srt_time_to_seconds(time_str: str) -> float:
     time_str = time_str.replace(',', '.')
@@ -451,24 +533,22 @@ def validate_segments_with_srt(
                 'end': seconds_to_srt_time(validated_end),
             })
 
+        # ---- 改进的segment合并逻辑（A1） ----
+        validated_segments = _merge_overlapping_segments(validated_segments)
+
         if len(validated_segments) >= 2:
+            cfg = _get_segment_merge_config()
             i = 0
             while i < len(validated_segments) - 1:
                 curr_end_sec = srt_time_to_seconds(validated_segments[i]['end'])
                 next_start_sec = srt_time_to_seconds(validated_segments[i + 1]['start'])
+                gap_entries_list = _gap_entries(entries, curr_end_sec, next_start_sec)
 
-                if curr_end_sec >= next_start_sec:
-                    validated_segments[i]['end'] = validated_segments[i + 1]['end']
-                    del validated_segments[i + 1]
-                    continue
-
-                gap_srts = [
-                    e for e in entries
-                    if e['start'] >= curr_end_sec and e['end'] <= next_start_sec
-                    and e.get('text', '').strip()
-                ]
-
-                if gap_srts:
+                if _should_merge_adjacent_segments(
+                    curr_end_sec, next_start_sec, gap_entries_list,
+                    silence_gap_max=cfg['silence_gap_max'],
+                    continuation_gap_max=cfg['continuation_gap_max'],
+                ):
                     validated_segments[i]['end'] = validated_segments[i + 1]['end']
                     del validated_segments[i + 1]
                 else:
@@ -775,7 +855,112 @@ def postprocess_funclip_topics(
     asr_conf_map: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     topics = validate_segments_with_srt(topics, srt_text, vad_silences=vad_silences, asr_conf_map=asr_conf_map)
-    return validate_funclip_topic_durations(topics)
+
+    # ---- A3: 边界扩展（反向追溯 + 收尾延伸） ----
+    try:
+        from backend.pipeline.topic_boundary import backfill_topic_boundaries
+        srt_entries = parse_srt_timeline(srt_text)
+        topics = backfill_topic_boundaries(topics, srt_entries)
+    except Exception as e:
+        logger.warning(f"边界扩展失败（A3），跳过: {e}")
+
+    # 合并短促的 product 类型片段到前一话题（确保丝滑衔接）
+    def _merge_short_product_into_previous(topics_list: List[Dict]) -> List[Dict]:
+        if not topics_list or len(topics_list) < 2:
+            return topics_list
+        # 读取配置：优先从 config_manager 获取可配置阈值
+        try:
+            from backend.core.shared_config import config_manager
+            settings = config_manager.settings
+            MAX_SECONDS = float(getattr(settings, 'product_merge_max_seconds', 8.0))
+            TITLE_SIM_TH = float(getattr(settings, 'product_merge_title_sim_threshold', 0.35))
+            KEY_OVERLAP_TH = float(getattr(settings, 'product_merge_key_overlap_threshold', 0.25))
+            TIME_GAP_MAX = float(getattr(settings, 'product_merge_time_gap_max', 10.0))
+            TIME_GAP_CLOSE = float(getattr(settings, 'product_merge_time_gap_close', 5.0))
+        except Exception:
+            from backend.core.shared_config import (
+                PRODUCT_MERGE_MAX_SECONDS,
+                PRODUCT_MERGE_TITLE_SIM_THRESHOLD,
+                PRODUCT_MERGE_KEY_OVERLAP_THRESHOLD,
+                PRODUCT_MERGE_TIME_GAP_MAX,
+                PRODUCT_MERGE_TIME_GAP_CLOSE,
+            )
+            MAX_SECONDS = PRODUCT_MERGE_MAX_SECONDS
+            TITLE_SIM_TH = PRODUCT_MERGE_TITLE_SIM_THRESHOLD
+            KEY_OVERLAP_TH = PRODUCT_MERGE_KEY_OVERLAP_THRESHOLD
+            TIME_GAP_MAX = PRODUCT_MERGE_TIME_GAP_MAX
+            TIME_GAP_CLOSE = PRODUCT_MERGE_TIME_GAP_CLOSE
+
+        merged_topics: List[Dict] = []
+        i = 0
+        while i < len(topics_list):
+            cur = topics_list[i]
+            # compute duration
+            cur_dur = compute_segments_duration_seconds(cur.get('segments', []))
+            # detect product-like
+            outline_text = str(cur.get('outline', '')).lower()
+            product_keywords = ('产品', '购买', '下单', '链接', '价格', '优惠', '折扣', '包邮', '买', '促销', '牛肉丸', '送你')
+            is_product = any(k in outline_text for k in product_keywords) or str(cur.get('topic_type', '')).lower() == 'product'
+
+            # short product candidate
+            if is_product and cur_dur <= MAX_SECONDS and merged_topics:
+                prev = merged_topics[-1]
+                # 判断语义承接：时间邻近或标题/关键词相似
+                try:
+                    prev_end = srt_time_to_seconds(prev.get('end_time') or prev.get('end', '00:00:00,000'))
+                    cur_start = srt_time_to_seconds(cur.get('start_time') or cur.get('start', '00:00:00,000'))
+                except Exception:
+                    prev_end = 0.0
+                    cur_start = 0.0
+
+                time_gap = cur_start - prev_end
+                title_sim = calculate_title_similarity(str(prev.get('outline', '')), str(cur.get('outline', '')))
+                prev_keys = set(_extract_keywords(prev.get('outline', '')))
+                cur_keys = set(_extract_keywords(cur.get('outline', '')))
+                key_overlap = 0.0
+                if prev_keys or cur_keys:
+                    union = len(prev_keys | cur_keys) or 1
+                    key_overlap = len(prev_keys & cur_keys) / union
+
+                # 合并条件：时间gap小且语义/关键词相似度足够
+                if (time_gap >= -1.0 and time_gap <= TIME_GAP_MAX and (title_sim > TITLE_SIM_TH or key_overlap > KEY_OVERLAP_TH or time_gap < TIME_GAP_CLOSE)):
+                    # 将 cur 的 segments 合并入 prev
+                    prev_segments = prev.get('segments') or []
+                    cur_segments = cur.get('segments') or []
+                    prev.setdefault('segments', [])
+                    prev['segments'].extend(cur_segments)
+                    # 更新 prev 的 end_time/end 字段
+                    try:
+                        # 使用 segments 计算新的 end
+                        all_segs = prev['segments']
+                        max_end = max(srt_time_to_seconds(s.get('end')) for s in all_segs if s.get('end'))
+                        prev['end_time'] = seconds_to_srt_time(max_end)
+                    except Exception:
+                        pass
+                    # 标记合并信息
+                    prev.setdefault('merged_from', []).append({'from_id': cur.get('id'), 'reason': 'short_product_merge'})
+                    prev['merged_product_short'] = True
+                    i += 1
+                    continue
+
+            merged_topics.append(cur)
+            i += 1
+
+        return merged_topics
+
+    topics = _merge_short_product_into_previous(topics)
+
+    topics = validate_funclip_topic_durations(topics)
+
+    # ---- A2: 覆盖率审计 ----
+    try:
+        from backend.pipeline.topic_coverage import compute_topic_coverage_stats
+        srt_entries = parse_srt_timeline(srt_text)
+        topics = compute_topic_coverage_stats(topics, srt_entries)
+    except Exception as e:
+        logger.warning(f"覆盖率审计失败（A2），跳过: {e}")
+
+    return topics
 
 
 def postprocess_timeline(timeline_data: List[Dict]) -> List[Dict]:

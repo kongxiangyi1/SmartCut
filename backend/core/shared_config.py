@@ -137,6 +137,13 @@ PRECLUSTER_TOP_KEYWORDS = 6
 PRECLUSTER_MAX_CLUSTERS_IN_REPORT = 8
 PRECLUSTER_MAX_ENTRIES_FOR_SIMILARITY = 600
 
+# 产品短句合并配置（用于后处理的短促产品合并策略）
+PRODUCT_MERGE_MAX_SECONDS = 8.0  # 小于等于该时长的 product 段候选合并
+PRODUCT_MERGE_TITLE_SIM_THRESHOLD = 0.35  # 标题相似度阈值
+PRODUCT_MERGE_KEY_OVERLAP_THRESHOLD = 0.25  # 关键词重合阈值
+PRODUCT_MERGE_TIME_GAP_MAX = 10.0  # 与前一段的最大时间间隙（秒）以考虑合并
+PRODUCT_MERGE_TIME_GAP_CLOSE = 5.0  # 视为非常接近的时间间隙阈值（秒）
+
 # 滑动窗口配置
 SLIDING_WINDOW = {
     "enabled": True,
@@ -178,6 +185,22 @@ class Settings(BaseModel):
     precluster_top_keywords: int = 6
     precluster_max_clusters_in_report: int = 8
     precluster_max_entries_for_similarity: int = 600
+    # 产品短句合并配置
+    product_merge_max_seconds: float = 8.0
+    product_merge_title_sim_threshold: float = 0.35
+    product_merge_key_overlap_threshold: float = 0.25
+    product_merge_time_gap_max: float = 10.0
+    product_merge_time_gap_close: float = 5.0
+    # 话题切分完整性改进 — 阶段A配置
+    segment_merge_silence_gap_max: float = 3.0      # gap内无字幕时允许合并
+    segment_merge_continuation_gap_max: float = 3.0 # 有承接字幕时的最大gap
+    segment_cross_gap_min: float = 3.0              # 超过此值视为跨话题，禁止合并
+    coverage_gap_min_duration: float = 5.0          # 报告gap最小时长（秒）
+    coverage_warn_threshold: float = 0.95           # 低于此值告警
+    max_backtrack_seconds: float = 300.0            # 反向追溯上限（秒）
+    max_forward_extend_entries: int = 5             # 收尾延伸最多向后看条目数
+    topic_selection_min_score: float = 0.5          # 替代硬编码Top-6的最低分数
+    topic_selection_hard_cap: int = 8               # 最大话题数上限
     # 语音识别配置
     speech_recognition_method: str = "whisper_local"
     speech_recognition_language: str = "auto"

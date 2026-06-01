@@ -694,6 +694,48 @@ def _split_topics_by_priority(topics_with_srt: List[Dict]) -> tuple:
 
 
 # ============================================================
+# 三步方案工具函数：话题选择（A4 — 替代硬编码 Top-6）
+# ============================================================
+
+def _get_topic_selection_config() -> Dict[str, float]:
+    try:
+        from backend.core.shared_config import config_manager
+        s = config_manager.settings
+        return {
+            'min_score': float(getattr(s, 'topic_selection_min_score', 0.5)),
+            'max_topics': int(getattr(s, 'topic_selection_hard_cap', 8)),
+        }
+    except Exception:
+        return {'min_score': 0.5, 'max_topics': 8}
+
+
+def _select_final_topics(
+    topics: List[Dict],
+    *,
+    min_score: float = None,
+    max_topics: int = None,
+) -> List[Dict]:
+    cfg = _get_topic_selection_config()
+    min_score = min_score if min_score is not None else cfg['min_score']
+    max_topics = max_topics if max_topics is not None else cfg['max_topics']
+
+    scored = sorted(topics, key=lambda t: t.get('final_score', 0), reverse=True)
+
+    kept = [t for t in scored if t.get('final_score', 0) >= min_score]
+
+    if not kept and scored:
+        kept = [scored[0]]
+
+    if len(kept) > max_topics:
+        kept = kept[:max_topics]
+
+    kept.sort(key=lambda t: _srt_time_to_seconds(t['segments'][0]['start']))
+    for i, t in enumerate(kept):
+        t['id'] = str(i + 1)
+    return kept
+
+
+# ============================================================
 # 三步方案工具函数：检查点持久化（P0修复5）
 # ============================================================
 
@@ -946,6 +988,13 @@ class FunClipStyleProcessor:
             logger.info(f"第一阶段LLM响应成功，长度: {len(response.content)} 字符")
             
             clips = self._parse_clips_only(response.content)
+
+            # 对两阶段识别结果做确定性后处理（包括短产品片段合并）
+            try:
+                from backend.pipeline.topic_postprocess import postprocess_funclip_topics
+                clips = postprocess_funclip_topics(clips, srt_text)
+            except Exception:
+                pass
             
             if not clips:
                 logger.warning("第一阶段未能解析出片段，使用降级方案")
@@ -1588,13 +1637,9 @@ class FunClipStyleProcessor:
             step1_topics = _merge_titles_to_topics(step1_topics, step3_titles or [])
 
             # ==========================================
-            # 最终后处理：排序 → Top 6 → 按时间升序
+            # 最终后处理：智能选择 → 按时间升序（A4）
             # ==========================================
-            step1_topics.sort(key=lambda t: t.get('final_score', 0), reverse=True)
-            step1_topics = step1_topics[:6]
-            step1_topics.sort(key=lambda t: _srt_time_to_seconds(t['segments'][0]['start']))
-            for i, topic in enumerate(step1_topics):
-                topic['id'] = str(i + 1)
+            step1_topics = _select_final_topics(step1_topics)
 
             clips = _convert_topics_to_clips(step1_topics)
             collections = self._generate_collections(clips)
