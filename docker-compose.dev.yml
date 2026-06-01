@@ -18,7 +18,7 @@ services:
     container_name: smartcut-app-dev
     restart: unless-stopped
     ports:
-      - "8000:8000"  # 后端API
+      - "8090:8090"  # 后端API
       - "3000:3000"  # 前端界面
     volumes:
       - ./backend:/app/backend
@@ -38,7 +38,7 @@ services:
     command: >
       sh -c "
         source venv/bin/activate &&
-        python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload &
+        python -m uvicorn backend.main:app --host 0.0.0.0 --port 8090 --reload &
         cd frontend && 
         if [ ! -d node_modules ]; then npm install; fi &&
         npx vite --host 0.0.0.0 --port 3000 &

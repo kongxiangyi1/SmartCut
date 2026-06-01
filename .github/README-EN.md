@@ -1,4 +1,4 @@
-# SmartCut - AI-Powered Video Highlight Tool
+﻿# SmartCut - AI-Powered Video Highlight Tool
 
 Supporting YouTube/Bilibili video download, automatic clipping, and smart collection
 generation
@@ -401,8 +401,8 @@ smartcut/
 
 After starting the system, visit the following addresses to view API documentation:
 
-- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- **Swagger UI**: [http://localhost:8090/docs](http://localhost:8090/docs)
+- **ReDoc**: [http://localhost:8090/redoc](http://localhost:8090/redoc)
 
 ### Main API Endpoints
 
@@ -425,7 +425,7 @@ After starting the system, visit the following addresses to view API documentati
 
 ```bash
 # Check port usage
-lsof -i :8000  # Backend port
+lsof -i :8090  # Backend port
 lsof -i :3000  # Frontend port
 
 # Stop occupying processes
@@ -475,7 +475,7 @@ tail -f logs/celery.log     # Task queue logs
 ./status_smartcut.sh
 
 # Manual service check
-curl http://localhost:8000/api/v1/health/  # Backend health check
+curl http://localhost:8090/api/v1/health/  # Backend health check
 curl http://localhost:3000/                # Frontend access test
 redis-cli ping                             # Redis connection test
 ```
@@ -492,7 +492,7 @@ source venv/bin/activate
 export PYTHONPATH="${PWD}:${PYTHONPATH}"
 
 # Start backend development server
-python -m uvicorn backend.main:app --reload --port 8000
+python -m uvicorn backend.main:app --reload --port 8090
 ```
 
 ### Frontend Development
@@ -581,8 +581,8 @@ docker-compose ps
 #### Access Services
 
 - **Frontend Interface**: [http://localhost:3000](http://localhost:3000)
-- **Backend API**: [http://localhost:8000](http://localhost:8000)
-- **API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Backend API**: [http://localhost:8090](http://localhost:8090)
+- **API Documentation**: [http://localhost:8090/docs](http://localhost:8090/docs)
 - **Flower Monitoring**: [http://localhost:5555](http://localhost:5555)
 
 #### Development Environment
@@ -719,7 +719,7 @@ A: Use the following commands to check and stop processes occupying ports:
 
 ```bash
 # Check port usage
-lsof -i :8000  # Backend port
+lsof -i :8090  # Backend port
 lsof -i :3000  # Frontend port
 
 # Stop processes
