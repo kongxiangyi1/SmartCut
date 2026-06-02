@@ -179,6 +179,7 @@ class Settings(BaseModel):
     max_topics_per_chunk: int = 8
     # 话题预聚类配置
     precluster_enabled: bool = True
+    precluster_step1_inject: bool = True
     precluster_similarity_threshold: float = 0.15
     precluster_min_cluster_size: int = 3
     precluster_min_multi_segment_size: int = 2

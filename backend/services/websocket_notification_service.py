@@ -109,6 +109,44 @@ class WebSocketNotificationService:
         except Exception as e:
             logger.warning(f"[WebSocket] 完成通知推送失败: {e}")
 
+    async def send_processing_started(
+        self,
+        project_id: str,
+        message: str = None
+    ):
+        """
+        推送处理开始通知
+
+        Args:
+            project_id: 项目ID
+            message: 消息
+        """
+        self.notify_stage_change(
+            project_id=project_id,
+            stage="processing_started",
+            message=message or "开始处理"
+        )
+
+    async def send_processing_error(
+        self,
+        project_id: str,
+        error: str,
+        step: str = None
+    ):
+        """
+        推送处理错误通知
+
+        Args:
+            project_id: 项目ID
+            error: 错误信息
+            step: 出错步骤
+        """
+        self.notify_error(
+            project_id=project_id,
+            error=error,
+            details={"step": step} if step else None
+        )
+
     def notify_stage_change(
         self,
         project_id: str,

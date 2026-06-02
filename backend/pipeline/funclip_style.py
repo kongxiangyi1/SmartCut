@@ -1485,10 +1485,82 @@ class FunClipStyleProcessor:
             except Exception as e:
                 logger.warning(f"保存 Step1 预处理元数据失败: {e}")
 
+            # 尝试注入预聚类报告（C2），非必需：失败不影响主流程
+            try:
+                from backend.core.shared_config import config_manager
+                settings = config_manager.settings
+                inject_precluster = bool(getattr(settings, 'precluster_step1_inject', True)) and bool(getattr(settings, 'precluster_enabled', True))
+            except Exception:
+                inject_precluster = True
+
+            if inject_precluster:
+                try:
+                    from backend.pipeline.topic_precluster import TopicPreCluster
+                    pre = TopicPreCluster()
+                    report = pre.process(srt_text)
+                    cov = 0.0
+                    try:
+                        cov = float(report.stats.get('coverage_ratio', 0.0))
+                    except Exception:
+                        cov = 0.0
+
+                    if cov >= 0.5 and getattr(report, 'clusters', None):
+                        try:
+                            block = self._format_precluster_block(report)
+                            enhanced_text = f"{block}\n\n---\n\n{enhanced_text}"
+                            # 写入 precluster 报告辅助文件以便回溯
+                            try:
+                                pc_path = self.metadata_dir / "step1_precluster_report.txt"
+                                with open(pc_path, 'w', encoding='utf-8') as pf:
+                                    pf.write(report.enhanced_text or '')
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.warning(f"格式化预聚类报告失败: {e}")
+                except Exception as e:
+                    logger.warning(f"预聚类注入失败（不影响主流程）: {e}")
+
             return enhanced_text
         except Exception as e:
             logger.warning(f"Step1 语义预处理失败，回退到填充词清理后的文本: {e}")
         return cleaned_srt
+
+    def _format_precluster_block(self, report) -> str:
+        """格式化预聚类报告文本，供 Step1 prompt 注入使用。"""
+        try:
+            from backend.pipeline.topic_postprocess import seconds_to_srt_time as to_srt
+        except Exception:
+            def to_srt(x):
+                # fallback: approximate formatter
+                h = int(x // 3600)
+                m = int((x % 3600) // 60)
+                s = x % 60
+                return f"{h:02d}:{m:02d}:{s:06.3f}".replace('.', ',')
+
+        lines = ["## 预聚类参考（辅助边界判断，非最终答案）"]
+        cov = report.stats.get('coverage_ratio', 0.0) if getattr(report, 'stats', None) else 0.0
+        lines.append(f"SRT条目覆盖率: {cov:.0%}")
+        lines.append("")
+        clusters = getattr(report, 'clusters', []) or []
+        for i, cluster in enumerate(clusters[:6]):
+            tr = cluster.time_ranges[0] if cluster.time_ranges else None
+            if tr:
+                start_str = to_srt(tr.start_seconds)
+                end_str = to_srt(tr.end_seconds)
+            else:
+                start_str, end_str = "??", "??"
+            keywords = ", ".join(cluster.topic_keywords[:4]) if getattr(cluster, 'topic_keywords', None) else ""
+            lines.append(f"簇{i+1}: {start_str}-{end_str}" + (f" 关键词={keywords}" if keywords else ""))
+            if getattr(cluster, 'is_multi_segment', False):
+                lines.append(f"  [多段] 在{len(cluster.time_ranges)}个时间段出现")
+            lines.append("")
+
+        lines.extend([
+            "",
+            "注意：预聚类基于n-gram相似度，可能过度合并。请结合语义判断。",
+            "若覆盖率 < 90%，请确保输出话题覆盖主要语段。",
+        ])
+        return "\n".join(lines)
 
     def _extract_srt_for_topic(self, segments: List[Dict], srt_entries: List[Dict]) -> str:
         if not segments or not srt_entries:
@@ -1506,12 +1578,14 @@ class FunClipStyleProcessor:
 
     def _prepare_step2_input(self, topics: List[Dict], srt_entries: List[Dict]) -> List[Dict]:
         topics_with_srt = []
+        use_full_context = self._is_long_context_provider()
         for topic in topics:
             segments = topic.get('segments', [])
             if not segments:
                 continue
             srt_text = self._extract_srt_for_topic(segments, srt_entries)
-            srt_text = _smart_truncate_srt_for_scoring(srt_text, segments)
+            if not use_full_context:
+                srt_text = _smart_truncate_srt_for_scoring(srt_text, segments)
 
             total_duration = sum(
                 _srt_time_to_seconds(seg['end']) - _srt_time_to_seconds(seg['start'])
@@ -1527,6 +1601,13 @@ class FunClipStyleProcessor:
             })
 
         return topics_with_srt
+
+    def _is_long_context_provider(self) -> bool:
+        """当前provider是否支持长上下文（≥100K tokens则无需截断）"""
+        try:
+            return self.llm_manager.supports_long_context(100_000)
+        except Exception:
+            return False
 
     def _prepare_step3_input(self, topics: List[Dict], srt_entries: List[Dict]) -> List[Dict]:
         topics_data = []
@@ -1789,15 +1870,16 @@ class FunClipStyleProcessor:
                     existing_topics_text.append(f"- {outline}")
             existing_text = '\n'.join(existing_topics_text)
 
-            prompt = FUNCLIP_STEP1_5_GAPFILL_PROMPT.format(
-                gap_srt=gap_srt,
-                existing_topics=existing_text,
-                gap_start=f"{gap['start']:.2f}",
-                gap_end=f"{gap['end']:.2f}"
+            gap_info = (
+                f"\n## 当前待处理的空白区间\n"
+                f"空白区间: {gap['start']:.2f}s - {gap['end']:.2f}s\n"
+                f"空白区间SRT字幕:\n{gap_srt}\n\n"
+                f"已有话题概览:\n{existing_text}\n"
             )
+            prompt = FUNCLIP_STEP1_5_GAPFILL_PROMPT + gap_info
 
             try:
-                response = self.llm.chat_one_turn(prompt, temperature=0.3)
+                response = self.llm_manager.call(prompt, temperature=0.3)
                 parsed = None
                 for block in re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', response):
                     try:

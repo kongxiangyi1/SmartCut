@@ -112,6 +112,7 @@ class LLMManager:
             ProviderType.SILICONFLOW: "siliconflow_api_key",
             ProviderType.ZHIPU: "zhipu_api_key",
             ProviderType.TENCENT: "tencent_api_key",
+            ProviderType.DEEPSEEK: "deepseek_api_key",
             ProviderType.OLLAMA: "ollama_api_key",
             ProviderType.LMSTUDIO: "lmstudio_api_key",
         }
@@ -238,6 +239,7 @@ class LLMManager:
             ProviderType.SILICONFLOW: "硅基流动",
             ProviderType.ZHIPU: "智谱AI",
             ProviderType.TENCENT: "腾讯混元",
+            ProviderType.DEEPSEEK: "DeepSeek",
             ProviderType.OLLAMA: "本地Ollama",
             ProviderType.LMSTUDIO: "本地LM Studio"
         }
@@ -247,7 +249,7 @@ class LLMManager:
         """获取所有可用模型"""
         all_models = LLMProviderFactory.get_all_available_models()
         result = {}
-        
+
         for provider_type, models in all_models.items():
             provider_name = provider_type.value
             result[provider_name] = [
@@ -259,8 +261,20 @@ class LLMManager:
                 }
                 for model in models
             ]
-        
+
         return result
+
+    def supports_long_context(self, min_tokens: int = 100_000) -> bool:
+        """当前模型是否支持长上下文（>= min_tokens）"""
+        if not self.current_provider:
+            return False
+        model_name = self.settings.get("model_name", "")
+        all_models = LLMProviderFactory.get_all_available_models()
+        for provider_type, models in all_models.items():
+            for model in models:
+                if model.name == model_name:
+                    return model.max_tokens >= min_tokens
+        return False
     
     def parse_json_response(self, response: str) -> Any:
         """解析JSON响应，支持清理尾逗号等LLM常见错误"""

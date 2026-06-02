@@ -58,6 +58,7 @@ def get_llm_config_status():
             'siliconflow': 'api_siliconflow_api_key',
             'zhipu': 'api_zhipu_api_key',
             'tencent': 'api_tencent_api_key',
+            'deepseek': 'api_deepseek_api_key',
             'ollama': 'api_ollama_api_key',
             'lmstudio': 'api_lmstudio_api_key',
         }
@@ -156,6 +157,7 @@ def get_secure_settings():
             "api_siliconflow_api_key": secure_manager.mask_sensitive_value('api_siliconflow_api_key'),
             "api_zhipu_api_key": secure_manager.mask_sensitive_value('api_zhipu_api_key'),
             "api_tencent_api_key": secure_manager.mask_sensitive_value('api_tencent_api_key'),
+            "api_deepseek_api_key": secure_manager.mask_sensitive_value('api_deepseek_api_key'),
             "api_ollama_api_key": secure_manager.mask_sensitive_value('api_ollama_api_key'),
             "dashscope_api_key": secure_manager.mask_sensitive_value('api_dashscope_api_key'),
             "openai_api_key": secure_manager.mask_sensitive_value('api_openai_api_key'),
@@ -163,6 +165,7 @@ def get_secure_settings():
             "siliconflow_api_key": secure_manager.mask_sensitive_value('api_siliconflow_api_key'),
             "zhipu_api_key": secure_manager.mask_sensitive_value('api_zhipu_api_key'),
             "tencent_api_key": secure_manager.mask_sensitive_value('api_tencent_api_key'),
+            "deepseek_api_key": secure_manager.mask_sensitive_value('api_deepseek_api_key'),
             "ollama_api_key": secure_manager.mask_sensitive_value('api_ollama_api_key'),
             "ollama_base_url": secure_manager.get('ollama_base_url', 'http://localhost:11434/v1'),
             "ollama_cached_models": secure_manager.get('ollama_cached_models', '[]'),
@@ -173,6 +176,7 @@ def get_secure_settings():
             "has_siliconflow_key": secure_manager.has_sensitive_value('api_siliconflow_api_key'),
             "has_zhipu_key": secure_manager.has_sensitive_value('api_zhipu_api_key'),
             "has_tencent_key": secure_manager.has_sensitive_value('api_tencent_api_key'),
+            "has_deepseek_key": secure_manager.has_sensitive_value('api_deepseek_api_key'),
             "has_ollama_key": secure_manager.has_sensitive_value('api_ollama_api_key'),
         }
         
@@ -216,6 +220,7 @@ def get_settings():
             "api_siliconflow_api_key": secure_manager.get_sensitive_value('api_siliconflow_api_key'),
             "api_zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "api_tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
+            "api_deepseek_api_key": secure_manager.get_sensitive_value('api_deepseek_api_key'),
             "api_ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
             "api_lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
             # 同时返回无 api_ 前缀的格式兼容前端
@@ -225,6 +230,7 @@ def get_settings():
             "siliconflow_api_key": secure_manager.get_sensitive_value('api_siliconflow_api_key'),
             "zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
+            "deepseek_api_key": secure_manager.get_sensitive_value('api_deepseek_api_key'),
             "ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
             "lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
             "ollama_base_url": secure_manager.get('ollama_base_url', 'http://localhost:11434/v1'),
@@ -466,6 +472,10 @@ def get_available_models():
             {"name": "hunyuan-lite", "display_name": "混元大模型Lite", "max_tokens": 8192, "description": "腾讯混元Lite模型"},
             {"name": "hunyuan-standard", "display_name": "混元大模型标准版", "max_tokens": 8192, "description": "腾讯混元标准版模型"}
         ],
+        "deepseek": [
+            {"name": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "max_tokens": 1000000, "description": "DeepSeek V4标准版，1M上下文，性价比极高"},
+            {"name": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro", "max_tokens": 1000000, "description": "DeepSeek V4旗舰版，1M上下文，最强性能"},
+        ],
         "ollama": [],
         "lmstudio": [],
     }
@@ -656,6 +666,7 @@ def get_current_provider():
             "gemini": "Google Gemini",
             "siliconflow": "硅基流动",
             "tencent": "腾讯混元",
+            "deepseek": "DeepSeek",
             "ollama": "本地Ollama",
             "lmstudio": "本地LM Studio"
         }

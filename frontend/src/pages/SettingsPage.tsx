@@ -129,6 +129,16 @@ const SettingsPage: React.FC = () => {
       secretKeyField: undefined,
       secretKeyPlaceholder: ''
     },
+    deepseek: {
+      name: 'DeepSeek',
+      icon: <RobotOutlined />,
+      color: '#4FC08D',
+      description: 'DeepSeek V4大模型，1M上下文，OpenAI兼容，性价比极高',
+      apiKeyField: 'deepseek_api_key',
+      placeholder: '请输入DeepSeek API密钥',
+      secretKeyField: undefined,
+      secretKeyPlaceholder: ''
+    },
     ollama: {
       name: '本地Ollama',
       icon: <RobotOutlined />,
@@ -188,6 +198,10 @@ const SettingsPage: React.FC = () => {
       { name: 'hunyuan-pro', display_name: '混元大模型Pro' },
       { name: 'hunyuan-lite', display_name: '混元大模型Lite' },
       { name: 'hunyuan-standard', display_name: '混元大模型标准版' }
+    ],
+    deepseek: [
+      { name: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash' },
+      { name: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro' }
     ],
     ollama: [],
     lmstudio: []

@@ -21,6 +21,7 @@ class ProviderType(Enum):
     SILICONFLOW = "siliconflow"  # 硅基流动
     ZHIPU = "zhipu"          # 智谱AI
     TENCENT = "tencent"      # 腾讯混元
+    DEEPSEEK = "deepseek"    # DeepSeek
     OLLAMA = "ollama"        # 本地Ollama
     LMSTUDIO = "lmstudio"    # 本地LM Studio
 
@@ -647,6 +648,79 @@ class TencentProvider(LLMProvider):
             )
         ]
 
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek 大模型提供商（OpenAI 兼容接口），使用 V4 系列模型"""
+
+    def __init__(self, api_key: str, model_name: str = "deepseek-v4-flash", **kwargs):
+        super().__init__(api_key, model_name, **kwargs)
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key,
+                base_url="https://api.deepseek.com/v1"
+            )
+        except ImportError:
+            raise ImportError("请安装 openai: pip install openai")
+
+    def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
+        """调用 DeepSeek API（OpenAI 兼容接口）"""
+        try:
+            messages = self._build_chat_messages(prompt, input_data)
+
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+
+            content = response.choices[0].message.content
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if response.usage else None
+
+            return LLMResponse(
+                content=content,
+                usage=usage,
+                model=self.model_name,
+                finish_reason=response.choices[0].finish_reason
+            )
+
+        except Exception as e:
+            logger.error(f"DeepSeek调用失败: {str(e)}")
+            raise
+
+    def test_connection(self) -> bool:
+        """测试 DeepSeek 连接"""
+        try:
+            response = self.call("请回复'测试成功'")
+            return "测试成功" in response.content or "success" in response.content.lower()
+        except Exception as e:
+            logger.error(f"DeepSeek连接测试失败: {e}")
+            return False
+
+    @staticmethod
+    def get_available_models() -> List[ModelInfo]:
+        """获取 DeepSeek 可用模型（V4 系列）"""
+        return [
+            ModelInfo(
+                name="deepseek-v4-flash",
+                display_name="DeepSeek V4 Flash",
+                provider=ProviderType.DEEPSEEK,
+                max_tokens=1_000_000,
+                description="DeepSeek V4标准版，1M上下文，性价比极高"
+            ),
+            ModelInfo(
+                name="deepseek-v4-pro",
+                display_name="DeepSeek V4 Pro",
+                provider=ProviderType.DEEPSEEK,
+                max_tokens=1_000_000,
+                description="DeepSeek V4旗舰版，1M上下文，最强性能"
+            ),
+        ]
+
+
 class OllamaProvider(LLMProvider):
     """本地Ollama大模型提供商（OpenAI 兼容接口）"""
 
@@ -843,6 +917,7 @@ class LLMProviderFactory:
         ProviderType.SILICONFLOW: SiliconFlowProvider,
         ProviderType.ZHIPU: ZhipuProvider,
         ProviderType.TENCENT: TencentProvider,
+        ProviderType.DEEPSEEK: DeepSeekProvider,
         ProviderType.OLLAMA: OllamaProvider,
         ProviderType.LMSTUDIO: LMStudioProvider,
     }
