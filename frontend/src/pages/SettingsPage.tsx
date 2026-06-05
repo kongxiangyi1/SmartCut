@@ -139,6 +139,16 @@ const SettingsPage: React.FC = () => {
       secretKeyField: undefined,
       secretKeyPlaceholder: ''
     },
+    moark: {
+      name: '模力方舟',
+      icon: <CloudOutlined />,
+      color: '#FF6600',
+      description: 'Gitee AI 模力方舟，OpenAI兼容',
+      apiKeyField: 'moark_api_key',
+      placeholder: '请输入模力方舟 API Key',
+      secretKeyField: undefined,
+      secretKeyPlaceholder: ''
+    },
     ollama: {
       name: '本地Ollama',
       icon: <RobotOutlined />,
@@ -202,6 +212,14 @@ const SettingsPage: React.FC = () => {
     deepseek: [
       { name: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash' },
       { name: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro' }
+    ],
+    moark: [
+      { name: 'deepseek-ai/DeepSeek-V4-Flash', display_name: 'DeepSeek V4 Flash' },
+      { name: 'deepseek-ai/DeepSeek-V4-Pro', display_name: 'DeepSeek V4 Pro' },
+      { name: 'Qwen3-8B', display_name: 'Qwen3-8B (免费)' },
+      { name: 'InternLM3-8B-Instruct', display_name: 'InternLM3-8B (免费)' },
+      { name: 'Qwen/Qwen2.5-72B-Instruct', display_name: 'Qwen2.5-72B' },
+      { name: 'meta-llama/Meta-Llama-3.1-70B-Instruct', display_name: 'Llama 3.1 70B' }
     ],
     ollama: [],
     lmstudio: []

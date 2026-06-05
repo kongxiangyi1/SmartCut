@@ -22,6 +22,7 @@ class ProviderType(Enum):
     ZHIPU = "zhipu"          # 智谱AI
     TENCENT = "tencent"      # 腾讯混元
     DEEPSEEK = "deepseek"    # DeepSeek
+    MOARK = "moark"          # 模力方舟（Gitee AI，OpenAI兼容）
     OLLAMA = "ollama"        # 本地Ollama
     LMSTUDIO = "lmstudio"    # 本地LM Studio
 
@@ -64,6 +65,9 @@ class LLMProvider(ABC):
         Returns:
             LLMResponse: 模型响应
         """
+
+    def warmup(self):
+        """预热模型（默认空实现，本地模型子类覆盖）"""
         pass
     
     @abstractmethod
@@ -721,25 +725,22 @@ class DeepSeekProvider(LLMProvider):
         ]
 
 
-class OllamaProvider(LLMProvider):
-    """本地Ollama大模型提供商（OpenAI 兼容接口）"""
+class MoarkProvider(LLMProvider):
+    """模力方舟（Gitee AI）大模型提供商（OpenAI 兼容接口）"""
 
-    def __init__(self, api_key: str, model_name: str = "qwen2.5", base_url: str = "http://localhost:11434/v1", **kwargs):
+    def __init__(self, api_key: str, model_name: str = "deepseek-ai/DeepSeek-V4-Flash", **kwargs):
         super().__init__(api_key, model_name, **kwargs)
-        self.base_url = base_url
         try:
             import openai
             self.client = openai.OpenAI(
-                api_key=api_key or "ollama",
-                base_url=base_url,
-                timeout=600.0,
-                max_retries=0
+                api_key=api_key,
+                base_url="https://ai.gitee.com/v1"
             )
         except ImportError:
             raise ImportError("请安装 openai: pip install openai")
 
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
-        """调用Ollama API（OpenAI兼容接口）"""
+        """调用模力方舟 API（OpenAI 兼容接口）"""
         try:
             messages = self._build_chat_messages(prompt, input_data)
 
@@ -764,6 +765,318 @@ class OllamaProvider(LLMProvider):
             )
 
         except Exception as e:
+            logger.error(f"模力方舟调用失败: {str(e)}")
+            raise
+
+    def test_connection(self) -> bool:
+        """测试模力方舟连接"""
+        try:
+            response = self.call("请回复'测试成功'")
+            return "测试成功" in response.content or "success" in response.content.lower()
+        except Exception as e:
+            logger.error(f"模力方舟连接测试失败: {e}")
+            return False
+
+    @staticmethod
+    def get_available_models() -> List[ModelInfo]:
+        """获取模力方舟可用模型"""
+        return [
+            ModelInfo(
+                name="deepseek-ai/DeepSeek-V4-Flash",
+                display_name="DeepSeek V4 Flash",
+                provider=ProviderType.MOARK,
+                max_tokens=1_000_000,
+                description="模力方舟 DeepSeek V4 Flash，1M上下文"
+            ),
+            ModelInfo(
+                name="deepseek-ai/DeepSeek-V4-Pro",
+                display_name="DeepSeek V4 Pro",
+                provider=ProviderType.MOARK,
+                max_tokens=1_000_000,
+                description="模力方舟 DeepSeek V4 Pro，最强性能"
+            ),
+            ModelInfo(
+                name="Qwen3-8B",
+                display_name="Qwen3-8B (免费)",
+                provider=ProviderType.MOARK,
+                max_tokens=32768,
+                description="模力方舟 Qwen3-8B，阿里通义千问3，免费模型"
+            ),
+            ModelInfo(
+                name="InternLM3-8B-Instruct",
+                display_name="InternLM3-8B (免费)",
+                provider=ProviderType.MOARK,
+                max_tokens=32768,
+                description="模力方舟 InternLM3-8B，书生·浦语3，免费模型"
+            ),
+            ModelInfo(
+                name="Qwen/Qwen2.5-72B-Instruct",
+                display_name="Qwen2.5-72B",
+                provider=ProviderType.MOARK,
+                max_tokens=131072,
+                description="模力方舟 Qwen2.5-72B，阿里通义千问"
+            ),
+            ModelInfo(
+                name="meta-llama/Meta-Llama-3.1-70B-Instruct",
+                display_name="Llama 3.1 70B",
+                provider=ProviderType.MOARK,
+                max_tokens=131072,
+                description="模力方舟 Llama 3.1 70B"
+            ),
+        ]
+
+
+class OllamaProvider(LLMProvider):
+    """本地Ollama大模型提供商（OpenAI 兼容接口）"""
+
+    SAFETY_MARGIN_TOKENS = 2000
+
+    def __init__(self, api_key: str, model_name: str = "qwen2.5", base_url: str = "http://localhost:11434/v1", **kwargs):
+        super().__init__(api_key, model_name, **kwargs)
+        self.base_url = base_url
+        self._warmed_up = False
+        self._truncated_prompt = None
+        self.context_window = kwargs.get('context_window', 16384)
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key or "ollama",
+                base_url=base_url,
+                timeout=600.0,
+                max_retries=0
+            )
+        except ImportError:
+            raise ImportError("请安装 openai: pip install openai")
+
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        chinese_chars = len([c for c in text if '\u4e00' <= c <= '\u9fff'])
+        other_chars = len(text) - chinese_chars
+        return int(chinese_chars * 2.0 + other_chars * 0.3)
+
+    def _truncate_input_if_needed(self, prompt: str, input_data: Any) -> Any:
+        """如果总输入超出上下文窗口，截断 input_data 以适配"""
+        if input_data is None or not isinstance(input_data, str):
+            return input_data
+        input_text = prompt + input_data
+        estimated_input = self._estimate_tokens(input_text)
+        max_input_tokens = self.context_window - self.SAFETY_MARGIN_TOKENS
+        if estimated_input <= max_input_tokens:
+            return input_data
+        prompt_tokens = self._estimate_tokens(prompt)
+        input_data_tokens = estimated_input - prompt_tokens
+        max_data_tokens = max_input_tokens - prompt_tokens
+        if max_data_tokens <= 64:
+            logger.warning(
+                f"提示词({prompt_tokens}t)本身已接近上下文窗口({self.context_window}), "
+                f"无法为输入数据预留空间"
+            )
+            return input_data
+        ratio = max_data_tokens / input_data_tokens
+        keep_chars = int(len(input_data) * ratio)
+        truncated = input_data[:max(keep_chars, 200)]
+        logger.warning(
+            f"本地模型上下文窗口不足: 预估输入 {estimated_input}t > {max_input_tokens}t, "
+            f"input_data 已从 {len(input_data)} 截断至 {len(truncated)} 字符({ratio:.0%})"
+        )
+        return truncated
+
+    def _parse_actual_context(self, error_msg: str) -> Optional[int]:
+        """从错误信息中解析本地模型的实际上下文窗口大小"""
+        import re
+        match = re.search(r'n_ctx:\s*(\d+)', error_msg)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _truncate_input_for_retry(self, prompt: str, input_data: Any) -> str:
+        self._truncated_prompt = None
+        prompt_est = self._estimate_tokens(prompt)
+        max_keep = self.context_window - self.SAFETY_MARGIN_TOKENS
+
+        if prompt_est >= max_keep:
+            budget = max(64, max_keep - 50)
+            ratio = budget / max(prompt_est, 1)
+            keep_chars = int(len(prompt) * ratio)
+            self._truncated_prompt = prompt[:max(keep_chars, 200)]
+            logger.warning(
+                f"提示词({prompt_est}t)超过上下文预算({max_keep}t)，"
+                f"已截断至 {self._estimate_tokens(self._truncated_prompt)}t"
+            )
+            return ""
+
+        if input_data and isinstance(input_data, str):
+            data_budget = max_keep - prompt_est
+            data_ratio = data_budget / max(self._estimate_tokens(input_data), 1)
+            keep_chars = int(len(input_data) * min(data_ratio, 1.0))
+            return input_data[:max(keep_chars, 100)]
+        return ""
+
+    def _adjust_max_tokens(self, user_max_tokens: Optional[int], prompt: str, input_data: Any) -> int:
+        input_text = prompt
+        if input_data:
+            if isinstance(input_data, str):
+                input_text += input_data
+            else:
+                input_text += str(input_data)
+        estimated_input = self._estimate_tokens(input_text)
+        available = self.context_window - estimated_input - self.SAFETY_MARGIN_TOKENS
+        if user_max_tokens is not None:
+            capped = min(user_max_tokens, available)
+        else:
+            capped = available
+        capped = max(capped, 64)
+        if capped < (user_max_tokens or 0):
+            logger.info(
+                f"Ollama max_tokens 已从 {user_max_tokens} 裁剪至 {capped} "
+                f"(预估输入 {estimated_input} tokens, 上下文 {self.context_window})"
+            )
+        return capped
+
+    def _detect_context_window(self):
+        probe_text = "test context window probe padding " * 500
+        try:
+            self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": probe_text}],
+                max_tokens=1,
+                temperature=0,
+                timeout=30.0
+            )
+            if self.context_window < 16384:
+                self.context_window = 16384
+            logger.info(f"Ollama 上下文窗口探针通过(>=4K), 当前设定: {self.context_window}")
+        except Exception as e:
+            actual_ctx = self._parse_actual_context(str(e))
+            if actual_ctx:
+                self.context_window = actual_ctx
+                logger.warning(
+                    f"Ollama 模型实际上下文窗口为 {self.context_window}, "
+                    f"已在初始化时自动适配"
+                )
+            else:
+                logger.debug(f"上下文检测非超限错误(不影响): {e}")
+
+    def _warmup(self):
+        if self._warmed_up:
+            return
+        logger.info("Ollama 模型预热中...")
+        try:
+            self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+                temperature=0,
+                timeout=120.0
+            )
+            self._warmed_up = True
+            self._detect_context_window()
+            logger.info(f"Ollama 模型预热完成，上下文窗口: {self.context_window}")
+        except Exception as e:
+            logger.warning(f"Ollama 模型预热失败: {e}")
+            self._warmed_up = True
+
+    def warmup(self):
+        self._warmup()
+
+    def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
+        """调用Ollama API（OpenAI兼容接口）"""
+        try:
+            self.warmup()
+            input_data = self._truncate_input_if_needed(prompt, input_data)
+            messages = self._build_chat_messages(prompt, input_data)
+
+            kwargs = dict(kwargs)
+            kwargs['max_tokens'] = self._adjust_max_tokens(
+                kwargs.get('max_tokens'), prompt, input_data
+            )
+
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                **kwargs
+            )
+
+            content = response.choices[0].message.content
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if response.usage else None
+
+            return LLMResponse(
+                content=content,
+                usage=usage,
+                model=self.model_name,
+                finish_reason=response.choices[0].finish_reason
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            if "model reloaded" in error_msg.lower():
+                logger.warning(f"LM Studio模型正在重新加载，等待3秒后自动重试: {error_msg}")
+                import time
+                time.sleep(3)
+                try:
+                    retry_response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        **kwargs
+                    )
+                    retry_content = retry_response.choices[0].message.content
+                    logger.info(f"LM Studio模型重载后重试成功")
+                    return LLMResponse(
+                        content=retry_content,
+                        usage={
+                            "prompt_tokens": retry_response.usage.prompt_tokens,
+                            "completion_tokens": retry_response.usage.completion_tokens,
+                            "total_tokens": retry_response.usage.total_tokens
+                        } if retry_response.usage else None,
+                        model=self.model_name,
+                        finish_reason=retry_response.choices[0].finish_reason
+                    )
+                except Exception as retry_e:
+                    logger.error(f"LM Studio模型重载后重试仍然失败: {retry_e}")
+                    raise
+            if any(kw in error_msg.lower() for kw in ["context size", "context_length", "maximum context", "context length", "n_ctx"]):
+                actual_ctx = self._parse_actual_context(error_msg)
+                if actual_ctx:
+                    logger.warning(
+                        f"本地模型实际上下文窗口为 {actual_ctx}, 低于默认值 {self.context_window}, "
+                        f"已自动适配为 {actual_ctx}。建议在LM Studio中加载模型时增大Context Length"
+                    )
+                    self.context_window = actual_ctx
+                logger.warning(f"本地模型上下文超限，尝试截断后重试: {error_msg}")
+                try:
+                    truncated_input = self._truncate_input_for_retry(prompt, input_data)
+                    retry_prompt = self._truncated_prompt if self._truncated_prompt else prompt
+                    retry_messages = self._build_chat_messages(retry_prompt, truncated_input)
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs['max_tokens'] = min(kwargs.get('max_tokens', 4096), 1024)
+                    retry_response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=retry_messages,
+                        **retry_kwargs
+                    )
+                    retry_content = retry_response.choices[0].message.content
+                    logger.info(f"上下文超限重试成功")
+                    return LLMResponse(
+                        content=retry_content,
+                        usage={
+                            "prompt_tokens": retry_response.usage.prompt_tokens,
+                            "completion_tokens": retry_response.usage.completion_tokens,
+                            "total_tokens": retry_response.usage.total_tokens
+                        } if retry_response.usage else None,
+                        model=self.model_name,
+                        finish_reason=retry_response.choices[0].finish_reason
+                    )
+                except Exception as retry_e:
+                    logger.error(
+                        f"模型上下文({self.context_window})过小，无法容纳提示词({self._estimate_tokens(prompt)}t)。"
+                        f"请在LM Studio中加载模型时增大Context Length设置，或使用更大上下文的模型"
+                    )
+                    raise
             logger.error(f"Ollama调用失败: {str(e)}")
             raise
 
@@ -841,9 +1154,14 @@ class OllamaProvider(LLMProvider):
 class LMStudioProvider(LLMProvider):
     """本地LM Studio大模型提供商（OpenAI 兼容接口）"""
 
+    SAFETY_MARGIN_TOKENS = 2000
+
     def __init__(self, api_key: str, model_name: str = "qwen2.5-7b-instruct", base_url: str = "http://localhost:1234/v1", **kwargs):
         super().__init__(api_key, model_name, **kwargs)
         self.base_url = base_url
+        self._warmed_up = False
+        self._truncated_prompt = None
+        self.context_window = kwargs.get('context_window', 16384)
         try:
             import openai
             self.client = openai.OpenAI(
@@ -855,10 +1173,149 @@ class LMStudioProvider(LLMProvider):
         except ImportError:
             raise ImportError("请安装 openai: pip install openai")
 
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        chinese_chars = len([c for c in text if '\u4e00' <= c <= '\u9fff'])
+        other_chars = len(text) - chinese_chars
+        return int(chinese_chars * 2.0 + other_chars * 0.3)
+
+    def _truncate_input_if_needed(self, prompt: str, input_data: Any) -> Any:
+        """如果总输入超出上下文窗口，截断 input_data 以适配"""
+        if input_data is None or not isinstance(input_data, str):
+            return input_data
+        input_text = prompt + input_data
+        estimated_input = self._estimate_tokens(input_text)
+        max_input_tokens = self.context_window - self.SAFETY_MARGIN_TOKENS
+        if estimated_input <= max_input_tokens:
+            return input_data
+        prompt_tokens = self._estimate_tokens(prompt)
+        input_data_tokens = estimated_input - prompt_tokens
+        max_data_tokens = max_input_tokens - prompt_tokens
+        if max_data_tokens <= 64:
+            logger.warning(
+                f"提示词({prompt_tokens}t)本身已接近上下文窗口({self.context_window}), "
+                f"无法为输入数据预留空间"
+            )
+            return input_data
+        ratio = max_data_tokens / input_data_tokens
+        keep_chars = int(len(input_data) * ratio)
+        truncated = input_data[:max(keep_chars, 200)]
+        logger.warning(
+            f"本地模型上下文窗口不足: 预估输入 {estimated_input}t > {max_input_tokens}t, "
+            f"input_data 已从 {len(input_data)} 截断至 {len(truncated)} 字符({ratio:.0%})"
+        )
+        return truncated
+
+    def _parse_actual_context(self, error_msg: str) -> Optional[int]:
+        """从错误信息中解析本地模型的实际上下文窗口大小"""
+        import re
+        match = re.search(r'n_ctx:\s*(\d+)', error_msg)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _truncate_input_for_retry(self, prompt: str, input_data: Any) -> str:
+        self._truncated_prompt = None
+        prompt_est = self._estimate_tokens(prompt)
+        max_keep = self.context_window - self.SAFETY_MARGIN_TOKENS
+
+        if prompt_est >= max_keep:
+            budget = max(64, max_keep - 50)
+            ratio = budget / max(prompt_est, 1)
+            keep_chars = int(len(prompt) * ratio)
+            self._truncated_prompt = prompt[:max(keep_chars, 200)]
+            logger.warning(
+                f"提示词({prompt_est}t)超过上下文预算({max_keep}t)，"
+                f"已截断至 {self._estimate_tokens(self._truncated_prompt)}t"
+            )
+            return ""
+
+        if input_data and isinstance(input_data, str):
+            data_budget = max_keep - prompt_est
+            data_ratio = data_budget / max(self._estimate_tokens(input_data), 1)
+            keep_chars = int(len(input_data) * min(data_ratio, 1.0))
+            return input_data[:max(keep_chars, 100)]
+        return ""
+
+    def _adjust_max_tokens(self, user_max_tokens: Optional[int], prompt: str, input_data: Any) -> int:
+        input_text = prompt
+        if input_data:
+            if isinstance(input_data, str):
+                input_text += input_data
+            else:
+                input_text += str(input_data)
+        estimated_input = self._estimate_tokens(input_text)
+        available = self.context_window - estimated_input - self.SAFETY_MARGIN_TOKENS
+        if user_max_tokens is not None:
+            capped = min(user_max_tokens, available)
+        else:
+            capped = available
+        capped = max(capped, 64)
+        if capped < (user_max_tokens or 0):
+            logger.info(
+                f"LM Studio max_tokens 已从 {user_max_tokens} 裁剪至 {capped} "
+                f"(预估输入 {estimated_input} tokens, 上下文 {self.context_window})"
+            )
+        return capped
+
+    def _detect_context_window(self):
+        probe_text = "test context window probe padding " * 500
+        try:
+            self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": probe_text}],
+                max_tokens=1,
+                temperature=0,
+                timeout=30.0
+            )
+            if self.context_window < 16384:
+                self.context_window = 16384
+            logger.info(f"LM Studio 上下文窗口探针通过(>=4K), 当前设定: {self.context_window}")
+        except Exception as e:
+            actual_ctx = self._parse_actual_context(str(e))
+            if actual_ctx:
+                self.context_window = actual_ctx
+                logger.warning(
+                    f"LM Studio 模型实际上下文窗口为 {self.context_window}, "
+                    f"已在初始化时自动适配"
+                )
+            else:
+                logger.debug(f"上下文检测非超限错误(不影响): {e}")
+
+    def _warmup(self):
+        if self._warmed_up:
+            return
+        logger.info("LM Studio 模型预热中...")
+        try:
+            self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+                temperature=0,
+                timeout=120.0
+            )
+            self._warmed_up = True
+            self._detect_context_window()
+            logger.info(f"LM Studio 模型预热完成，上下文窗口: {self.context_window}")
+        except Exception as e:
+            logger.warning(f"LM Studio 模型预热失败: {e}")
+            self._warmed_up = True
+
+    def warmup(self):
+        self._warmup()
+
     def call(self, prompt: str, input_data: Any = None, **kwargs) -> LLMResponse:
         """调用LM Studio API（OpenAI兼容接口）"""
         try:
+            self.warmup()
+            input_data = self._truncate_input_if_needed(prompt, input_data)
             messages = self._build_chat_messages(prompt, input_data)
+
+            kwargs = dict(kwargs)
+            kwargs['max_tokens'] = self._adjust_max_tokens(
+                kwargs.get('max_tokens'), prompt, input_data
+            )
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -881,6 +1338,70 @@ class LMStudioProvider(LLMProvider):
             )
 
         except Exception as e:
+            error_msg = str(e)
+            if "model reloaded" in error_msg.lower():
+                logger.warning(f"LM Studio模型正在重新加载，等待3秒后自动重试: {error_msg}")
+                import time
+                time.sleep(3)
+                try:
+                    retry_response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        **kwargs
+                    )
+                    retry_content = retry_response.choices[0].message.content
+                    logger.info(f"LM Studio模型重载后重试成功")
+                    return LLMResponse(
+                        content=retry_content,
+                        usage={
+                            "prompt_tokens": retry_response.usage.prompt_tokens,
+                            "completion_tokens": retry_response.usage.completion_tokens,
+                            "total_tokens": retry_response.usage.total_tokens
+                        } if retry_response.usage else None,
+                        model=self.model_name,
+                        finish_reason=retry_response.choices[0].finish_reason
+                    )
+                except Exception as retry_e:
+                    logger.error(f"LM Studio模型重载后重试仍然失败: {retry_e}")
+                    raise
+            if any(kw in error_msg.lower() for kw in ["context size", "context_length", "maximum context", "context length", "n_ctx"]):
+                actual_ctx = self._parse_actual_context(error_msg)
+                if actual_ctx:
+                    logger.warning(
+                        f"本地模型实际上下文窗口为 {actual_ctx}, 低于默认值 {self.context_window}, "
+                        f"已自动适配为 {actual_ctx}。建议在LM Studio中加载模型时增大Context Length"
+                    )
+                    self.context_window = actual_ctx
+                logger.warning(f"LM Studio上下文超限，尝试截断后重试: {error_msg}")
+                try:
+                    truncated_input = self._truncate_input_for_retry(prompt, input_data)
+                    retry_prompt = self._truncated_prompt if self._truncated_prompt else prompt
+                    retry_messages = self._build_chat_messages(retry_prompt, truncated_input)
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs['max_tokens'] = min(kwargs.get('max_tokens', 4096), 1024)
+                    retry_response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=retry_messages,
+                        **retry_kwargs
+                    )
+                    retry_content = retry_response.choices[0].message.content
+                    logger.info(f"LM Studio上下文超限重试成功")
+                    return LLMResponse(
+                        content=retry_content,
+                        usage={
+                            "prompt_tokens": retry_response.usage.prompt_tokens,
+                            "completion_tokens": retry_response.usage.completion_tokens,
+                            "total_tokens": retry_response.usage.total_tokens
+                        } if retry_response.usage else None,
+                        model=self.model_name,
+                        finish_reason=retry_response.choices[0].finish_reason
+                    )
+                except Exception as retry_e:
+                    logger.error(
+                        f"模型上下文({self.context_window})过小，无法容纳提示词({self._estimate_tokens(prompt)}t)。"
+                        f"请在LM Studio中加载模型时增大Context Length设置，或使用更大上下文的模型"
+                    )
+                    raise
             logger.error(f"LM Studio调用失败: {str(e)}")
             raise
 
@@ -918,6 +1439,7 @@ class LLMProviderFactory:
         ProviderType.ZHIPU: ZhipuProvider,
         ProviderType.TENCENT: TencentProvider,
         ProviderType.DEEPSEEK: DeepSeekProvider,
+        ProviderType.MOARK: MoarkProvider,
         ProviderType.OLLAMA: OllamaProvider,
         ProviderType.LMSTUDIO: LMStudioProvider,
     }
