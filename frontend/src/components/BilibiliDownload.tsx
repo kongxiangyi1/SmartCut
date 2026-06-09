@@ -553,7 +553,7 @@ const BilibiliDownload: React.FC<BilibiliDownloadProps> = ({ onDownloadSuccess }
               trailColor="rgba(255, 255, 255, 0.1)"
               showInfo={false}
               style={{ height: '8px' }}
-              strokeWidth={8}
+              size={8}
             />
           </div>
           

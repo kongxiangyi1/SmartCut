@@ -57,6 +57,8 @@ def _should_merge_adjacent_segments(
     *,
     silence_gap_max: float = 3.0,
     continuation_gap_max: float = 3.0,
+    semantic_gap_max: float = 30.0,
+    clip_keywords: Optional[set] = None,
 ) -> bool:
     gap = next_start - curr_end
 
@@ -66,7 +68,13 @@ def _should_merge_adjacent_segments(
     if not gap_entries_list:
         return gap <= silence_gap_max
 
+    # gap超过普通截止阈值但在语义阈值内 → 检查内容相关性
     if gap > continuation_gap_max:
+        if gap <= semantic_gap_max and clip_keywords:
+            for ge in gap_entries_list:
+                text = ge.get('text', '')
+                if any(kw in text for kw in clip_keywords):
+                    return True
         return False
 
     return all(
@@ -140,6 +148,13 @@ def parse_srt_timeline(srt_text: str) -> List[Dict]:
         end = srt_time_to_seconds(time_match.group(2))
         text = ' '.join(lines[2:]).strip()
 
+        # 解析SRT序号
+        seq_num = None
+        try:
+            seq_num = int(lines[0].strip())
+        except (ValueError, IndexError):
+            pass
+
         entries.append({
             'start': start,
             'end': end,
@@ -147,6 +162,7 @@ def parse_srt_timeline(srt_text: str) -> List[Dict]:
             'end_str': time_match.group(2).replace('.', ','),
             'text': text,
             'duration': end - start,
+            'seq_num': seq_num,
         })
 
     entries.sort(key=lambda e: e['start'])
@@ -434,6 +450,9 @@ def validate_segments_with_srt(
         logger.warning("无法解析SRT时间线，跳过验证")
         return merged_clips
 
+
+
+
     logger.info(f"SRT时间线解析完成: {len(entries)} 条字幕条目")
 
     for clip in merged_clips:
@@ -528,6 +547,38 @@ def validate_segments_with_srt(
                         'reason': f"SRT时间戳间隙{gap:.1f}秒（静音）",
                     })
 
+            # ---- 方案A: SRT序号连续性检测 ----
+            # 检查contained内最后几条SRT的序号连续性，若有跳号则截断
+            if len(contained) >= 2:
+                # 从后往前找第一次序号不连续
+                for ci in range(len(contained) - 1, 0, -1):
+                    seq_cur = contained[ci].get('seq_num')
+                    seq_prev = contained[ci - 1].get('seq_num')
+                    if seq_cur is not None and seq_prev is not None and seq_cur - seq_prev > 1:
+                        truncate_at = min(validated_end, contained[ci - 1]['end'])
+                        if truncate_at < validated_end:
+                            logger.info(
+                                f"SRT序号跳变({seq_prev}→{seq_cur})截断: "
+                                f"{seconds_to_srt_time(validated_end)} → {seconds_to_srt_time(truncate_at)}"
+                            )
+                            validated_end = truncate_at
+                        break
+
+            # ---- 方案A(补充): 段末尾部跨话题截断 ----
+            # 如果段末尾的最后两条SRT之间有较大间隙(>50% threshold)，
+            # 说明间隙后的内容可能是独立/跨话题，截断在间隙之前
+            if len(contained) >= 2:
+                gap_tail = contained[-1]['start'] - contained[-2]['end']
+                if gap_tail > use_threshold * 0.5 and gap_tail > 1.0:
+                    # 间隙后半段内容较短且与前半段隔离 → 截断
+                    truncate_at = min(validated_end, contained[-2]['end'])
+                    if truncate_at < validated_end:
+                        logger.info(
+                            f"段尾SRT间隙({gap_tail:.1f}s)检测到跨话题可能，"
+                            f"截断: {seconds_to_srt_time(validated_end)} → {seconds_to_srt_time(truncate_at)}"
+                        )
+                        validated_end = truncate_at
+
             validated_segments.append({
                 'start': seconds_to_srt_time(validated_start),
                 'end': seconds_to_srt_time(validated_end),
@@ -548,6 +599,10 @@ def validate_segments_with_srt(
                     curr_end_sec, next_start_sec, gap_entries_list,
                     silence_gap_max=cfg['silence_gap_max'],
                     continuation_gap_max=cfg['continuation_gap_max'],
+                    semantic_gap_max=30.0,
+                    clip_keywords=_extract_keywords(
+                        f"{clip.get('generated_title', '')} {clip.get('outline', '')}"
+                    ),
                 ):
                     validated_segments[i]['end'] = validated_segments[i + 1]['end']
                     del validated_segments[i + 1]
@@ -609,7 +664,113 @@ def validate_segments_with_srt(
                 clip.setdefault('removed_sections', []).append(removed)
                 existing_starts.add(key)
 
+    # ---- 跨clip边界修正（Plan C） ----
+    merged_clips = _adjust_cross_clip_boundaries(merged_clips, entries)
+
     return merged_clips
+
+
+def _extract_keywords(text: str) -> set:
+    """从文本中提取2-4字的关键短语，用于边界内容匹配"""
+    # 停用词表：过滤高泛化的通用词，避免误匹配
+    _STOP_WORDS = {
+        '存在', '知道', '自己', '这个', '那个', '什么', '怎么', '一个',
+        '可以', '我们', '他们', '你们', '因为', '所以', '如果', '但是',
+        '而且', '然后', '接着', '还有', '开始', '继续', '就是', '不是',
+        '没有', '可能', '虽然', '最终', '总结', '对比', '结合', '深度',
+        '深入', '解释', '描述', '说明', '比如', '例如', '还有', '还是',
+        '或是', '或是', '或是', '只是', '只要', '只有', '在于', '关于',
+        '对于', '的是', '的是', '整体', '部分', '很多', '一些', '有点',
+        '看到', '听到', '想到', '觉得', '感觉', '需要', '重要', '主要',
+        '具有', '拥有', '包括', '其中', '之间', '之后', '之前', '上面',
+        '下面', '前面', '后面', '里面', '外面', '这边', '那边', '这里',
+        '那里', '这时', '那时', '已经', '已经', '经过', '通过',
+    }
+    parts = re.split(r'[，。、；：！？\s,\.;:!?\-\d]+', text)
+    keywords = set()
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) >= 2 and len(part) <= 4:
+            if part not in _STOP_WORDS:
+                keywords.add(part)
+        elif len(part) > 4:
+            # 对长短语，提取3-4字滑动窗口（跳过2字窗口以减少误匹配）
+            for j in range(len(part) - 2):
+                for k in range(j + 3, min(j + 5, len(part) + 1)):
+                    sub = part[j:k]
+                    if len(sub) >= 3 and sub not in _STOP_WORDS:
+                        keywords.add(sub)
+    return keywords
+
+
+def _adjust_cross_clip_boundaries(
+    clips: List[Dict],
+    entries: List[Dict]
+) -> List[Dict]:
+    """
+    跨clip边界修正：检测并截断尾部越界。
+    当clip的最后一条SRT内容匹配下一个clip的关键词时，
+    将该SRT从当前clip尾部截断，确保话题边界干净。
+    """
+    if len(clips) < 2:
+        return clips
+
+    for i in range(len(clips) - 1):
+        cur_clip = clips[i]
+        next_clip = clips[i + 1]
+        cur_segments = cur_clip.get('segments', [])
+        next_segments = next_clip.get('segments', [])
+
+        if not cur_segments or not next_segments:
+            continue
+
+        # 提取下一个clip的关键词（从generated_title和outline）
+        next_title = next_clip.get('generated_title', next_clip.get('title', ''))
+        next_outline = next_clip.get('outline', next_clip.get('description', ''))
+        next_keywords = _extract_keywords(f"{next_title} {next_outline}")
+
+        if not next_keywords:
+            continue
+
+        # ----- 修正A: 当前clip尾部越界截断 -----
+        last_seg = cur_segments[-1]
+        last_seg_start = srt_time_to_seconds(last_seg.get('start', '00:00:00,000'))
+        last_seg_end = srt_time_to_seconds(last_seg.get('end', '00:00:00,000'))
+
+        # 找到最后完全包含的SRT条目
+        contained = [e for e in entries if e['start'] >= last_seg_start and e['end'] <= last_seg_end]
+        if not contained:
+            continue
+
+        # 限定搜索范围：最多检查最后10条SRT（避免距边界过远的误匹配）
+        max_search = min(10, len(contained))
+        search_start = len(contained) - max_search
+
+        # 从后往前检查边界附近的SRT条目是否匹配下个clip的关键词
+        for ci in range(len(contained) - 1, search_start - 1, -1):
+            srt_text = contained[ci].get('text', '')
+            if any(kw in srt_text for kw in next_keywords):
+                # 发现过渡内容，截断到这条SRT之前
+                if ci == 0:
+                    # 整段都是过渡内容，截断到段首
+                    new_end = last_seg_start
+                else:
+                    new_end = contained[ci - 1]['end']
+                new_end_sec = new_end
+                old_end_sec = last_seg_end
+                if new_end_sec < old_end_sec:
+                    cur_segments[-1]['end'] = seconds_to_srt_time(new_end_sec)
+                    first_kw = list(next_keywords)[0] if next_keywords else ''
+                    logger.info(
+                        f"跨clip边界调整: Clip {cur_clip.get('id','?')} 尾部含 Clip {next_clip.get('id','?')} "
+                        f"关键词'{first_kw}' (SRT #{contained[ci].get('seq_num','?')}), "
+                        f"截断 {seconds_to_srt_time(old_end_sec)} → {seconds_to_srt_time(new_end_sec)}"
+                    )
+                break
+
+    return clips
 
 
 def fix_overlapping_timeline(timeline_data: List[Dict]) -> List[Dict]:

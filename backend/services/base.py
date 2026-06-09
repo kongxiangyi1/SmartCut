@@ -77,9 +77,32 @@ class BaseService(Generic[ModelType, CreateSchemaType, UpdateSchemaType, Respons
             raise NotImplementedError(f"Model class {model_class_name} not found")
     
     def update(self, entity_id: str, **kwargs) -> Optional[ModelType]:
-        """更新实体"""
+        """
+        更新实体（自动记录 Project 的处理开始/完成时间）
+
+        当 status 字段变化时自动记录:
+        - pending → processing: 设置 started_at
+        - processing → completed: 设置 completed_at
+        """
         entity = self.repository.get_by_id(entity_id)
         if entity:
+            from datetime import datetime, timezone
+
+            # 判断是否涉及项目状态变迁（仅当更新了 status 字段且实体有时间列时）
+            if 'status' in kwargs and hasattr(entity, 'started_at'):
+                current_status = getattr(entity, 'status', None)
+                new_status = kwargs['status']
+
+                # pending → processing: 记录 started_at（仅在尚未记录时）
+                if (current_status == 'pending' or current_status is None) and new_status == 'processing':
+                    if not getattr(entity, 'started_at', None):
+                        kwargs.setdefault('started_at', datetime.now(timezone.utc))
+
+                # processing → completed: 记录 completed_at（仅在尚未记录时）
+                if current_status == 'processing' and new_status == 'completed':
+                    if not getattr(entity, 'completed_at', None):
+                        kwargs.setdefault('completed_at', datetime.now(timezone.utc))
+
             for key, value in kwargs.items():
                 setattr(entity, key, value)
             self.db.commit()

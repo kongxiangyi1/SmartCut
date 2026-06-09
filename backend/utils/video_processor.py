@@ -12,6 +12,7 @@ from pathlib import Path
 try:
     from ..core.shared_config import CLIPS_DIR, COLLECTIONS_DIR
     from .keyframe_aligner import KeyframeAligner
+    from .silence_concat import SilenceConcat
 except ImportError:
     # 如果相对导入失败，尝试绝对导入
     import sys
@@ -21,6 +22,7 @@ except ImportError:
         sys.path.insert(0, str(backend_path))
     from ..core.shared_config import CLIPS_DIR, COLLECTIONS_DIR
     from .keyframe_aligner import KeyframeAligner
+    from .silence_concat import SilenceConcat
 
 logger = logging.getLogger(__name__)
 
@@ -195,12 +197,11 @@ class VideoProcessor:
             ffmpeg_start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_sec)
             ffmpeg_duration = f"{duration:.3f}"
 
-            # 构建帧精确的FFmpeg命令：使用 -ss AFTER -i 保证帧精确，使用 -t 指定持续时长
-            # 使用重新编码以确保帧精确切割，避免 -c copy 导致的关键帧对齐问题（画面静止）
+            # 帧精确切割：-ss 在 -i 前快速跳转到最近关键帧，-c:v libx264 重新编码确保帧精确输出
             cmd = [
                 'ffmpeg',
-                '-i', str(input_video),
                 '-ss', ffmpeg_start_time,
+                '-i', str(input_video),
                 '-t', ffmpeg_duration,
                 '-c:v', 'libx264',
                 '-preset', 'fast',
@@ -393,31 +394,63 @@ class VideoProcessor:
             logger.error(f"获取视频信息异常: {str(e)}")
             return {}
     
-    def batch_extract_clips(self, input_video: Path, clips_data: List[Dict]) -> Tuple[List[Path], List[Dict]]:
+    def batch_extract_clips(
+        self,
+        input_video: Path,
+        clips_data: List[Dict],
+        apply_silence_processing: bool = True,
+        full_audio_vad_path: Optional[Path] = None,  # ← 新增
+    ) -> Tuple[List[Path], List[Dict]]:
         """
-        批量提取视频片段（支持关键帧对齐）
-        
+        批量提取视频片段（支持关键帧对齐 + 静音移除后处理）
+
         Args:
             input_video: 输入视频路径
-            clips_data: 片段数据列表，每个元素包含id、title、start_time、end_time
-            
+            clips_data: 片段数据列表
+            apply_silence_processing: 是否对提取后的切片应用静音移除处理
+            full_audio_vad_path: .vad.json 路径（P1 预计算 VAD 结果）
+
         Returns:
             元组 (成功提取的片段路径列表, 处理后的片段数据列表)
-            处理后的片段数据包含实际切割时间，用于同步到元数据
         """
         successful_clips = []
         processed_clips_data = []
-        
+
         try:
-            keyframe_aligner = KeyframeAligner(input_video)
+            cache_dir = input_video.parent / ".keyframe_cache"
+            keyframe_aligner = KeyframeAligner(input_video, cache_dir=cache_dir)
             keyframe_aligner.ensure_initialized()
-            
             aligned_clips_data = keyframe_aligner.align_clips(clips_data, strategy="balanced")
             logger.info(f"关键帧对齐完成，共{len(aligned_clips_data)}个切片")
         except Exception as e:
             logger.warning(f"关键帧对齐失败，将使用原始时间: {e}")
             aligned_clips_data = clips_data
-        
+
+        # 加载 P1 VAD 结果（如果提供）
+        full_audio_vad = None
+        if full_audio_vad_path and full_audio_vad_path.exists():
+            try:
+                from backend.utils.silero_vad_wrapper import SileroVADWrapper
+                full_audio_vad = SileroVADWrapper.load_vad_json(full_audio_vad_path)
+                logger.info(f"加载 P1 VAD 结果: {len(full_audio_vad)} 段语音, 来源: {full_audio_vad_path}")
+            except Exception as e:
+                logger.warning(f"加载 VAD 结果失败: {e}，将使用 FFmpeg 回退")
+
+        # 初始化静音处理器（如果需要）
+        silence_processor = None
+        if apply_silence_processing:
+            try:
+                silence_processor = SilenceConcat(
+                    long_silence_threshold=1.0,
+                    short_silence_keep=0.8,
+                    buffer_duration=0.2,
+                    silence_threshold_db=-35.0,
+                )
+                logger.info("静音处理器初始化成功")
+            except Exception as e:
+                logger.warning(f"静音处理器初始化失败，将跳过静音处理: {e}")
+                silence_processor = None
+
         for clip_data in aligned_clips_data:
             clip_id = clip_data['id']
             title = clip_data.get('title', f"片段_{clip_id}")
@@ -425,23 +458,72 @@ class VideoProcessor:
             end_time = clip_data['end_time']
             original_start = clip_data.get('original_start', start_time)
             original_end = clip_data.get('original_end', end_time)
-            
-            # 处理时间格式 - 如果是秒数，转换为SRT格式
+
+            # 记录原始秒数（用于 VAD 坐标映射）
+            try:
+                raw_start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                    VideoProcessor.convert_srt_time_to_ffmpeg_time(str(start_time))
+                ) if isinstance(start_time, str) else float(start_time)
+                raw_end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                    VideoProcessor.convert_srt_time_to_ffmpeg_time(str(end_time))
+                ) if isinstance(end_time, str) else float(end_time)
+            except Exception:
+                raw_start_sec = 0.0
+                raw_end_sec = 0.0
+
+            # 处理时间格式
             if isinstance(start_time, (int, float)):
                 start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_time)
             if isinstance(end_time, (int, float)):
                 end_time = VideoProcessor.convert_seconds_to_ffmpeg_time(end_time)
-            
-            # 使用标题作为文件名，并清理不合法的字符
-            # 在文件名中包含clip_id，便于后续合集拼接时查找
+
             safe_title = VideoProcessor.sanitize_filename(title)
             output_path = self.clips_dir / f"{clip_id}_{safe_title}.mp4"
-            
-            logger.info(f"提取切片 {clip_id}: {original_start} -> {original_end} (对齐后: {start_time} -> {end_time}), 输出: {output_path}")
-            
+
+            logger.info(
+                f"提取切片 {clip_id}: {original_start} -> {original_end} "
+                f"(对齐后: {start_time} -> {end_time}), 输出: {output_path}"
+            )
+
             if VideoProcessor.extract_clip(input_video, output_path, start_time, end_time):
+                # ---- 静音后处理（VAD 复用模式优先） ----
+                if silence_processor is not None:
+                    temp_path = output_path.with_suffix(f".silence_temp{output_path.suffix}")
+                    try:
+                        if full_audio_vad is not None and raw_end_sec > raw_start_sec:
+                            # VAD 复用模式：用 P1 VAD 结果，无需 FFmpeg 检测
+                            logger.info(f"切片 {clip_id} 开始静音移除处理 (VAD复用)")
+                            success = silence_processor.process_clip_with_vad(
+                                input_video=output_path,
+                                output_video=temp_path,
+                                clip_start_sec=raw_start_sec,
+                                clip_end_sec=raw_end_sec,
+                                full_audio_vad=full_audio_vad,
+                                clip_id=str(clip_id),
+                            )
+                        else:
+                            # 回退模式：老方法（FFmpeg silencedetect）
+                            logger.info(f"切片 {clip_id} 开始静音移除处理 (FFmpeg回退)")
+                            success = silence_processor.process_clip(
+                                input_video=output_path,
+                                output_video=temp_path,
+                                clip_id=str(clip_id),
+                            )
+
+                        if success and temp_path.exists():
+                            temp_path.replace(output_path)
+                            logger.info(f"切片 {clip_id} 静音移除完成")
+                        else:
+                            logger.warning(f"切片 {clip_id} 静音移除无变化，保留原切片")
+                            if temp_path.exists():
+                                temp_path.unlink()
+                    except Exception as e:
+                        logger.warning(f"切片 {clip_id} 静音处理异常: {e}，保留原切片")
+                        if temp_path.exists():
+                            temp_path.unlink()
+                # ---- 静音后处理结束 ----
+
                 successful_clips.append(output_path)
-                
                 processed_clips_data.append({
                     'id': clip_id,
                     'title': title,
@@ -450,13 +532,15 @@ class VideoProcessor:
                     'original_start': original_start,
                     'original_end': original_end,
                     'output_path': str(output_path),
-                    'keyframe_aligned': clip_data.get('keyframe_aligned', False)
+                    'keyframe_aligned': clip_data.get('keyframe_aligned', False),
+                    'silence_processed': silence_processor is not None,
+                    'vad_reused': full_audio_vad is not None,
                 })
-                
+
                 logger.info(f"切片 {clip_id} 提取成功")
             else:
                 logger.error(f"切片 {clip_id} 提取失败")
-        
+
         logger.info(f"批量提取完成，成功 {len(successful_clips)}/{len(clips_data)} 个切片")
         return successful_clips, processed_clips_data
     

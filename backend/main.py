@@ -77,7 +77,7 @@ root_logger.addHandler(file_handler)
 logger = logging.getLogger(__name__)
 
 # 使用统一的API路由注册（延迟导入，避免过早加载模型）
-from core.database import engine, Base
+from core.database import engine, Base, _upgrade_schema
 
 # Create FastAPI app
 app = FastAPI(
@@ -95,6 +95,7 @@ async def startup_event():
     # 不再导入模型，因为api_router已经导入了
     # 直接创建表
     Base.metadata.create_all(bind=engine)
+    _upgrade_schema(engine)
     logger.info("数据库表创建完成")
 
     # 加载API密钥到环境变量

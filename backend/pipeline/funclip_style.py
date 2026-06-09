@@ -142,6 +142,237 @@ def _deduplicate_clip_segments(merged_clips: List[Dict]) -> List[Dict]:
     return result
 
 
+def _apply_silence_processing(processor, output_path: Path, clip_id: str) -> None:
+    """
+    对已提取的切片视频应用静音移除后处理。
+    使用临时文件方案：处理成功则替换原文件，失败时保留原文件不变。
+    """
+    import shutil
+    temp_path = output_path.with_suffix('.silence_clean.mp4')
+    try:
+        ok = processor.process_clip(
+            input_video=output_path,
+            output_video=temp_path,
+            clip_id=str(clip_id)
+        )
+        if ok and temp_path.exists():
+            # 用处理后的文件替换原文件
+            temp_path.replace(output_path)
+            logger.info(f"  切片 {clip_id} 静音移除完成")
+        else:
+            if ok:
+                logger.info(f"  切片 {clip_id} 静音处理无变化，保留原文件")
+            else:
+                logger.warning(f"  切片 {clip_id} 静音处理失败，保留原文件")
+            if temp_path.exists():
+                temp_path.unlink()
+    except Exception as e:
+        logger.warning(f"  切片 {clip_id} 静音处理异常: {e}，保留原文件")
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def _load_vad_silence_ranges(metadata_dir: Path) -> Optional[List[tuple[float, float]]]:
+    """
+    从VAD结果加载静音段列表（speech_segments反转）。
+    依次查找 raw/vad.json, raw/vad_results.json, metadata/vad.json。
+    返回 [(start_sec, end_sec), ...] 或 None（无VAD文件时）。
+    """
+    import json
+
+    vad_candidates = [
+        metadata_dir.parent / "raw" / "vad.json",
+        metadata_dir.parent / "raw" / "vad_results.json",
+        metadata_dir / "vad.json",
+    ]
+    for vad_path in vad_candidates:
+        if not vad_path.exists():
+            continue
+        try:
+            data = json.loads(vad_path.read_text(encoding='utf-8'))
+            speech = data.get('speech_segments') or data.get('segments') or []
+            if not speech:
+                continue
+
+            # 获取音频总时长
+            last_end = speech[-1].get('end', speech[-1].get('end_sec', 0))
+            audio_dur = data.get('audio_duration') or last_end or 0
+
+            # 反转：语音段 → 静音段
+            silences: list[tuple[float, float]] = []
+            prev_end = 0.0
+            for seg in speech:
+                s = seg.get('start', seg.get('start_sec', 0))
+                e = seg.get('end', seg.get('end_sec', 0))
+                if s - prev_end > 0.5:
+                    silences.append((prev_end, s))
+                prev_end = e
+            # 末尾静音
+            if audio_dur - prev_end > 0.5:
+                silences.append((prev_end, audio_dur))
+
+            logger.info(f"从VAD加载 {len(silences)} 个静音段 (总时长{audio_dur:.1f}s)")
+            return silences
+        except Exception as e:
+            logger.warning(f"解析VAD文件失败 {vad_path.name}: {e}")
+    return None
+
+
+def _ffmpeg_detect_segment_silences(
+    video_path: Path, seg_start: float, seg_end: float,
+    temp_audio_path: Path, min_silence: float = 0.5,
+    silence_db: float = -30.0
+) -> list[tuple[float, float]]:
+    """
+    对源视频在 [seg_start, seg_end] 范围内用FFmpeg silencedetect检测静音。
+    返回 [(source_start_sec, source_end_sec), ...]。
+    """
+    import subprocess
+
+    duration = seg_end - seg_start
+    if duration <= 0:
+        return []
+
+    # 确保临时目录存在
+    temp_audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 提取音频
+    cmd_extract = [
+        'ffmpeg', '-y',
+        '-ss', f'{seg_start:.3f}',
+        '-i', str(video_path),
+        '-t', f'{duration:.3f}',
+        '-vn', '-acodec', 'pcm_s16le',
+        '-ar', '16000', '-ac', '1',
+        str(temp_audio_path)
+    ]
+    r1 = subprocess.run(cmd_extract, capture_output=True)
+    if r1.returncode != 0:
+        logger.warning(f"提取音频失败: {r1.stderr.decode(errors='ignore')[:200]}")
+        return []
+
+    # 静音检测
+    cmd_detect = [
+        'ffmpeg', '-i', str(temp_audio_path),
+        '-af', f'silencedetect=n={silence_db}dB:d={min_silence}',
+        '-f', 'null', '-'
+    ]
+    r2 = subprocess.run(cmd_detect, capture_output=True, text=True)
+    stderr = r2.stderr
+
+    # 解析输出: silence_start / silence_end
+    pattern_start = re.compile(r'silence_start:\s*([\d.]+)')
+    pattern_end = re.compile(r'silence_end:\s*([\d.]+)')
+
+    starts = [float(m.group(1)) for m in pattern_start.finditer(stderr)]
+    ends = [float(m.group(1)) for m in pattern_end.finditer(stderr)]
+
+    # 对齐起止，转换回源视频时间
+    silences: list[tuple[float, float]] = []
+    for i in range(min(len(starts), len(ends))):
+        s = seg_start + starts[i]
+        e = seg_start + ends[i]
+        if e - s >= min_silence:
+            silences.append((s, e))
+
+    # 处理最后一条start缺少对应end的情况（音频末尾静音）
+    if len(starts) > len(ends):
+        s = seg_start + starts[-1]
+        e = seg_start + duration
+        if e - s >= min_silence:
+            silences.append((s, e))
+
+    return silences
+
+
+def _merge_removed_ranges(
+    ranges: list[tuple[float, float]], gap_threshold: float = 0.3
+) -> list[tuple[float, float]]:
+    """合并相邻/重叠的时间段"""
+    if not ranges:
+        return []
+    sorted_ranges = sorted(ranges, key=lambda x: x[0])
+    merged: list[tuple[float, float]] = [sorted_ranges[0]]
+    for s, e in sorted_ranges[1:]:
+        last_s, last_e = merged[-1]
+        if s - last_e <= gap_threshold:
+            merged[-1] = (last_s, max(last_e, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _prepopulate_removed_sections(
+    clips: list[dict], video_path: Path,
+    metadata_dir: Path, temp_dir: Path
+) -> None:
+    """
+    在切割前为每个clip预生成_removed_sections（追加模式）。
+    优先使用VAD数据（如果存在），否则回退到FFmpeg silencedetect。
+    新增静音段会追加到已有段后，统一合并去重。
+    """
+    # 尝试加载VAD静音数据
+    vad_silences = _load_vad_silence_ranges(metadata_dir)
+
+    for clip in clips:
+        segments = clip.get('_segments', [])
+        if not segments:
+            continue
+
+        new_removed: list[tuple[float, float]] = []
+
+        for seg in segments:
+            seg_start = _srt_time_to_seconds(seg['start'])
+            seg_end = _srt_time_to_seconds(seg['end'])
+
+            if vad_silences:
+                # VAD路线：从全局静音列表取交集
+                for vs, ve in vad_silences:
+                    overlap_s = max(seg_start, vs)
+                    overlap_e = min(seg_end, ve)
+                    if overlap_e - overlap_s >= 0.5:
+                        new_removed.append((overlap_s, overlap_e))
+            else:
+                # FFmpeg路线：对segment范围检测
+                temp_audio = temp_dir / f'presilence_{clip["id"]}.wav'
+                seg_silences = _ffmpeg_detect_segment_silences(
+                    video_path, seg_start, seg_end, temp_audio
+                )
+                new_removed.extend(seg_silences)
+                # 清理临时文件
+                if temp_audio.exists():
+                    temp_audio.unlink()
+
+        if not new_removed:
+            continue
+
+        merged = _merge_removed_ranges(new_removed)
+
+        # 追加模式：读取已有段，合并后统一去重
+        existing = clip.get('_removed_sections', [])
+        existing_sec = [
+            (_srt_time_to_seconds(r['start']),
+             _srt_time_to_seconds(r['end']))
+            for r in existing
+        ]
+        all_sections = existing_sec + merged
+        all_merged = _merge_removed_ranges(all_sections)
+
+        clip['_removed_sections'] = [
+            {
+                'start': _seconds_to_srt_time(s),
+                'end': _seconds_to_srt_time(e),
+                'reason': f'VAD检测静音({e - s:.1f}秒)' if vad_silences
+                          else f'FFmpeg检测静音({e - s:.1f}秒)'
+            }
+            for s, e in all_merged
+        ]
+        logger.info(
+            f"Clip {clip['id']}: 原有 {len(existing)} 个静音段 + "
+            f"新增 {len(merged)} 个 = 共 {len(all_merged)} 个"
+        )
+
+
 def _compute_effective_segments(segments: List[Dict], removed_sections: List[Dict],
                                  buffer: float = 0.2) -> List[Dict]:
     """
@@ -288,7 +519,7 @@ def _merge_srt_segments(srt_path: Path, merged_clips: List[Dict]) -> List[Dict]:
 
 def _filter_vad_silence_by_segments(vad_silence: List[tuple],
                                      segments: List[Dict],
-                                     min_silence_duration: float = 2.0) -> List[Dict]:
+                                     min_silence_duration: float = 0.5) -> List[Dict]:
     """
     将 VAD 检测到的全音频静音区间，筛选为只落在指定 segments 范围内的静音段
 
@@ -1177,6 +1408,7 @@ class FunClipStyleProcessor:
 
             # ===== 第一阶段：仅识别片段边界 =====
             logger.info("开始第一阶段LLM调用（识别片段边界）...")
+            enhanced_text = self._truncate_srt_for_local_model(enhanced_text)
             logger.info(f"输入SRT文本长度: {len(enhanced_text)} 字符")
 
             response = self.llm_manager.current_provider.call(
@@ -1278,6 +1510,7 @@ class FunClipStyleProcessor:
                 enhanced_text = _clean_filler_words(srt_text)
 
             logger.info("开始合并方案LLM调用（话题切分 + 标题生成 + 静音剔除）...")
+            enhanced_text = self._truncate_srt_for_local_model(enhanced_text)
             logger.info(f"输入SRT文本长度: {len(enhanced_text)} 字符")
 
             response = self.llm_manager.current_provider.call(
@@ -1608,6 +1841,32 @@ class FunClipStyleProcessor:
             return self.llm_manager.supports_long_context(100_000)
         except Exception:
             return False
+
+    def _is_local_provider(self) -> bool:
+        """当前是否为本地模型提供商（Ollama / LM Studio），需要上下文限制"""
+        try:
+            provider_type = self.llm_manager.settings.get("llm_provider", "")
+            return provider_type in ("ollama", "lmstudio")
+        except Exception:
+            return False
+
+    def _truncate_srt_for_local_model(self, srt_text: str, max_chars: int = 8000) -> str:
+        """本地模型上下文有限，截断SRT文本到安全长度"""
+        if not self._is_local_provider() or len(srt_text) <= max_chars:
+            return srt_text
+        lines = srt_text.split('\n')
+        head_lines = 60
+        tail_lines = 40
+        if len(lines) <= head_lines + tail_lines:
+            return srt_text
+        result = '\n'.join(lines[:head_lines])
+        result += '\n...（中间省略）...\n'
+        result += '\n'.join(lines[-tail_lines:])
+        logger.info(
+            f"本地模型SRT已截断: {len(srt_text)} -> {len(result)} 字符 "
+            f"(保留前后共{head_lines + tail_lines}行)"
+        )
+        return result
 
     def _prepare_step3_input(self, topics: List[Dict], srt_entries: List[Dict]) -> List[Dict]:
         topics_data = []
@@ -1999,6 +2258,35 @@ class FunClipStyleProcessor:
 
             clips = _convert_topics_to_clips(step1_topics)
             collections = self._generate_collections(clips)
+
+            # ---- C3: 计算完整性指标并写入 metadata （非阻塞） ----
+            try:
+                from backend.pipeline.topic_completeness import compute_all_completeness
+                try:
+                    from backend.core.shared_config import config_manager
+                    completeness_enabled = getattr(config_manager.settings, 'completeness_enabled', True)
+                except Exception:
+                    completeness_enabled = True
+
+                if completeness_enabled:
+                    try:
+                        srt_entries = _parse_srt_timeline(srt_text)
+                        clips = compute_all_completeness(clips, srt_entries)
+                        # write summary metadata
+                        try:
+                            out_path = self.metadata_dir / 'topic_completeness.json'
+                            with open(out_path, 'w', encoding='utf-8') as f:
+                                json.dump({'clips': [
+                                    {'id': c.get('id'), 'completeness': c.get('completeness')}
+                                    for c in clips
+                                ]}, f, ensure_ascii=False, indent=2)
+                        except Exception as e:
+                            logger.warning(f"写入完整性 metadata 失败: {e}")
+                    except Exception as e:
+                        logger.warning(f"计算完整性指标失败: {e}")
+            except Exception:
+                # 如果模块不可用则跳过，不影响主流程
+                pass
 
             checkpoint.clear()
 
@@ -2481,6 +2769,7 @@ def run_funclip_pipeline(srt_path: Path,
     logger.info("=" * 60)
 
     # 复用 FunASR 的 fsmn-vad 结果检测静音（无需独立运行 Silero VAD）
+    MIN_SILENCE_DURATION = 0.5
     vad_silence_all = []
     try:
         if srt_path and srt_path.exists():
@@ -2492,31 +2781,64 @@ def run_funclip_pipeline(srt_path: Path,
                 duration = speech_segs[-1]['end'] if speech_segs else 0.0
                 prev_end = 0.0
                 for seg in speech_segs:
-                    if seg['start'] - prev_end >= 2.0:
+                    if seg['start'] - prev_end >= MIN_SILENCE_DURATION:
                         vad_silence_all.append((prev_end, seg['start']))
                     prev_end = seg['end']
-                if duration - prev_end >= 2.0:
+                if duration - prev_end >= MIN_SILENCE_DURATION:
                     vad_silence_all.append((prev_end, duration))
-                logger.info(f"从 VAD 数据推导出 {len(vad_silence_all)} 段静音(>=2s)")
+                logger.info(f"从 VAD 数据推导出 {len(vad_silence_all)} 段静音(>={MIN_SILENCE_DURATION}s)")
 
-                if vad_silence_all:
-                    vad_count = 0
-                    for clip in clips:
-                        segments = clip.get('_segments', [])
-                        if not segments:
+            # VAD 数据无效（0 或 1 段语音）时，回退到 FFmpeg silencedetect
+            if not vad_silence_all:
+                from backend.utils.silence_processor import SilenceProcessor
+                # 按优先级查找音频源：ASR 生成的音频 → 硬编码名 → 原视频文件
+                audio_candidates = [
+                    srt_path.parent / f"{video_path.stem}_audio.wav",  # ASR 实际生成的文件名
+                    srt_path.parent / "input_audio.wav",               # 部分旧逻辑硬编码
+                ]
+                audio_path = None
+                for candidate in audio_candidates:
+                    if candidate.exists():
+                        audio_path = candidate
+                        break
+                # 所有 wav 都不存在时，直接用视频文件（FFmpeg 会自动读取音频流）
+                if audio_path is None:
+                    audio_path = video_path
+                    logger.info(f"未找到预先提取的音频，直接使用视频源: {audio_path}")
+
+                logger.info(f"VAD 数据无效，回退到 FFmpeg silencedetect: {audio_path}")
+                # 使用 -30dB 阈值，最小静音长度 0.5 秒
+                raw_silences = SilenceProcessor.process_silence(
+                    audio_path, threshold=-35.0, min_silence_duration=MIN_SILENCE_DURATION
+                )
+                if raw_silences:
+                    vad_silence_all = raw_silences
+                    logger.info(f"FFmpeg silencedetect 检测到 {len(vad_silence_all)} 段静音")
+
+            if vad_silence_all:
+                vad_count = 0
+                for clip in clips:
+                    segments = clip.get('_segments', [])
+                    if not segments:
+                        # fallback: 用 start_time/end_time 构造单段确保 VAD 静音可被追加
+                        s = clip.get('start_time') or clip.get('start')
+                        e = clip.get('end_time') or clip.get('end')
+                        if s and e:
+                            segments = [{'start': s, 'end': e}]
+                        else:
                             continue
-                        clip_vad = _filter_vad_silence_by_segments(
-                            vad_silence_all, segments
-                        )
-                        if clip_vad:
-                            existing = clip.setdefault('_removed_sections', [])
-                            existing.extend(clip_vad)
-                            vad_count += len(clip_vad)
-                    logger.info(f"VAD静音检测完成: 共添加 {vad_count} 段音频级静音到各片段")
-            else:
-                logger.info("VAD 数据文件不存在，跳过音频级静音检测")
+                    clip_vad = _filter_vad_silence_by_segments(
+                        vad_silence_all, segments
+                    )
+                    if clip_vad:
+                        existing = clip.setdefault('_removed_sections', [])
+                        existing.extend(clip_vad)
+                        vad_count += len(clip_vad)
+                logger.info(f"VAD静音检测完成: 共添加 {vad_count} 段音频级静音到各片段")
+        else:
+            logger.info("SRT 文件不存在，跳过静音检测")
     except Exception as e:
-        logger.warning(f"VAD静音检测跳过: {e}")
+        logger.warning(f"静音检测跳过: {e}")
 
     # 转换格式以匹配 video_generator 的期望
     clips_for_video = []
@@ -2545,6 +2867,7 @@ def run_funclip_pipeline(srt_path: Path,
         clips_for_video.append(video_clip)
 
     from backend.utils.video_processor import VideoProcessor as VP
+    from backend.utils.silence_concat import SilenceConcat
     # 视频生成
     video_generator = VideoGenerator(
         clips_dir=clips_output_dir,
@@ -2552,12 +2875,36 @@ def run_funclip_pipeline(srt_path: Path,
         metadata_dir=metadata_dir
     )
 
+    # 初始化静音处理器（用于后续对每个切片做静音移除后处理）
+    try:
+        silence_processor = SilenceConcat(
+            long_silence_threshold=0.5,
+            short_silence_keep=0.5,
+            buffer_duration=0.15,
+            silence_threshold_db=-28.0
+        )
+        logger.info("静音处理器初始化成功，将应用于每个切片的视频提取")
+    except Exception as e:
+        logger.warning(f"静音处理器初始化失败，跳过静音处理: {e}")
+        silence_processor = None
+
     # 处理多段不连续切片
     temp_dir = metadata_dir / "temp_segments"
     successful_clips = []
     processed_clips_data = []
 
-    for video_clip in clips_for_video:
+    # ── 预生成 _removed_sections ──
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    _prepopulate_removed_sections(clips_for_video, video_path, metadata_dir, temp_dir)
+    # ──────────────────────────────
+
+    # ── 视频切割并行化（ThreadPoolExecutor，max_workers=2） ──
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    _results_lock = threading.Lock()
+
+    def _process_single_clip(video_clip: dict) -> List[Any]:
+        """处理单个切片提取，返回 [successful_path or None, processed_data or None]"""
         segments = video_clip.get('_segments', None)
         removed = video_clip.get('_removed_sections', [])
         clip_id = video_clip['id']
@@ -2572,7 +2919,7 @@ def run_funclip_pipeline(srt_path: Path,
         # 防御：segments为空时跳过该切片（LLM可能返回None）
         if not effective_segments:
             logger.warning(f"切片 {video_clip['id']} 无有效段（_segments为空），跳过")
-            continue
+            return [None, None]
 
         if len(effective_segments) > 1:
             # 多段不连续：提取每段再拼接
@@ -2581,7 +2928,6 @@ def run_funclip_pipeline(srt_path: Path,
                 video_path, output_path, effective_segments, temp_dir
             )
             if success:
-                successful_clips.append(output_path)
                 # 计算实际总时长（各段时长之和，不含间隙）
                 total_duration = sum(
                     _srt_time_to_seconds(s['end']) - _srt_time_to_seconds(s['start'])
@@ -2589,7 +2935,7 @@ def run_funclip_pipeline(srt_path: Path,
                 )
                 start_sec = _srt_time_to_seconds(effective_segments[0]['start'])
                 actual_end_sec = start_sec + total_duration
-                processed_clips_data.append({
+                data = {
                     'id': clip_id,
                     'title': title,
                     'start_time': _seconds_to_srt_time(start_sec),
@@ -2598,10 +2944,16 @@ def run_funclip_pipeline(srt_path: Path,
                     'keyframe_aligned': False,
                     'multi_segment': True,
                     'segment_count': len(effective_segments)
-                })
+                }
                 logger.info(f"  多段切片 {clip_id} 提取成功 ({len(effective_segments)}段合并)")
+                # ---- 静音后处理 ----
+                if silence_processor is not None:
+                    _apply_silence_processing(silence_processor, output_path, clip_id)
+                # ----
+                return [output_path, data]
             else:
                 logger.error(f"  多段切片 {clip_id} 提取失败")
+                return [None, None]
         else:
             # 单段：使用原有方式
             logger.info(f"单段切片 {clip_id}: 常规切割...")
@@ -2609,8 +2961,7 @@ def run_funclip_pipeline(srt_path: Path,
             end_time = effective_segments[0].get('end', video_clip.get('end_time', '00:05:00,000'))
 
             if VP.extract_clip(video_path, output_path, start_time, end_time):
-                successful_clips.append(output_path)
-                processed_clips_data.append({
+                data = {
                     'id': clip_id,
                     'title': title,
                     'start_time': start_time,
@@ -2618,10 +2969,36 @@ def run_funclip_pipeline(srt_path: Path,
                     'output_path': str(output_path),
                     'keyframe_aligned': False,
                     'multi_segment': False
-                })
+                }
                 logger.info(f"  单段切片 {clip_id} 提取成功")
+                # ---- 静音后处理 ----
+                if silence_processor is not None:
+                    _apply_silence_processing(silence_processor, output_path, clip_id)
+                # ----
+                return [output_path, data]
             else:
                 logger.error(f"  单段切片 {clip_id} 提取失败")
+                return [None, None]
+
+    # 并行执行视频切割
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_to_clip = {
+            executor.submit(_process_single_clip, video_clip): video_clip
+            for video_clip in clips_for_video
+        }
+        for future in as_completed(future_to_clip):
+            try:
+                path, data = future.result()
+                with _results_lock:
+                    if path is not None:
+                        successful_clips.append(path)
+                    if data is not None:
+                        processed_clips_data.append(data)
+            except Exception as e:
+                logger.error(f"切片处理异常: {e}")
+
+    # 按 clip id 排序 processed_clips_data 以保持确定性顺序
+    processed_clips_data.sort(key=lambda x: str(x.get('id', '')))
 
     # 生成合集
     successful_collections = video_generator.generate_collections(collections)

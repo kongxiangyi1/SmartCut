@@ -27,3 +27,7 @@ psutil
 funasr>=1.3.0
 scikit-learn>=1.3.0
 zhipuai>=2.1.5
+
+# Voice Activity Detection
+silero-vad>=4.1.0
+onnxruntime>=1.16.1

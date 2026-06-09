@@ -99,31 +99,35 @@ class OutlineExtractor:
         chunk_files = self._save_chunks_to_files(chunks)
         self._save_srt_chunks(chunks)
 
+        # 检查是否有可用的LLM提供商
+        if not self.llm_manager.current_provider:
+            logger.warning("没有可用的LLM提供商，跳过大纲提取")
+            return []
+
         all_outlines = []
 
-        # 6. 逐一处理每个文本块文件
-        for i, chunk_file in enumerate(chunk_files):
-            logger.info(f"处理第{i+1}/{len(chunks)}个文本块: {chunk_file.name}")
+        # 6. 并行处理每个文本块文件（ThreadPoolExecutor）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _process_one_chunk(idx: int) -> List[Dict]:
+            """处理单个文本块，返回解析后的大纲列表"""
+            chunk_file = chunk_files[idx]
+            logger.info(f"处理第{idx+1}/{len(chunks)}个文本块: {chunk_file.name}")
             try:
                 # 读取文本块内容
                 with open(chunk_file, 'r', encoding='utf-8') as f:
                     chunk_text = f.read()
 
-                # 检查是否有可用的LLM提供商
-                if not self.llm_manager.current_provider:
-                    logger.warning("没有可用的LLM提供商，跳过大纲提取")
-                    break
+                # 获取当前块的相关热词
+                chunk_hotwords = self._get_chunk_hotwords(idx, self.hotwords, chunks)
 
-                # 【新增】获取当前块的相关热词
-                chunk_hotwords = self._get_chunk_hotwords(i, self.hotwords, chunks)
-
-                # 【新增】增强提示词
+                # 增强提示词
                 enhanced_prompt = self._enhance_prompt_with_hotwords(
                     self.outline_prompt,
                     chunk_hotwords
                 )
 
-                chunk_input_text = self._enhance_chunk_with_precluster(chunk_text, chunks[i])
+                chunk_input_text = self._enhance_chunk_with_precluster(chunk_text, chunks[idx])
 
                 # 为每个块调用LLM
                 input_data = {"text": chunk_input_text}
@@ -137,14 +141,36 @@ class OutlineExtractor:
                 if llm_content:
                     # 解析响应并附加块索引
                     parsed_outlines = self._parse_outline_response(
-                        llm_content, i, chunk_hotwords
+                        llm_content, idx, chunk_hotwords
                     )
-                    all_outlines.extend(parsed_outlines)
+                    logger.info(f"第{idx+1}个文本块处理完成，提取到 {len(parsed_outlines)} 个大纲")
+                    return parsed_outlines
                 else:
-                    logger.warning(f"处理第{i+1}个文本块时返回空响应")
+                    logger.warning(f"处理第{idx+1}个文本块时返回空响应")
+                    return []
             except Exception as e:
-                logger.error(f"处理第{i+1}个文本块失败: {e}")
-                continue
+                logger.error(f"处理第{idx+1}个文本块失败: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_idx = {
+                executor.submit(_process_one_chunk, i): i
+                for i in range(len(chunk_files))
+            }
+            chunk_results = {}
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    chunk_results[idx] = future.result()
+                except Exception as e:
+                    logger.error(f"第{idx+1}个文本块处理异常: {e}")
+                    chunk_results[idx] = []
+
+        # 按块索引排序确保结果顺序确定性
+        for i in range(len(chunk_files)):
+            outlines = chunk_results.get(i, [])
+            if outlines:
+                all_outlines.extend(outlines)
 
         # 7. 合并和去重
         final_outlines = self._merge_outlines(all_outlines)

@@ -62,7 +62,7 @@ class SilenceProcessor:
             return False
     
     @staticmethod
-    def skip_leading_silence(audio_path: Path, threshold: float = -40.0) -> float:
+    def skip_leading_silence(audio_path: Path, threshold: float = -35.0) -> float:
         """
         计算开头静音跳过时间
         
@@ -118,7 +118,7 @@ class SilenceProcessor:
             return 0.0
     
     @staticmethod
-    def process_silence(audio_path: Path, threshold: float = -40.0, 
+    def process_silence(audio_path: Path, threshold: float = -35.0, 
                        min_silence_duration: float = 0.5) -> list:
         """
         处理音频中的静音
@@ -175,7 +175,7 @@ class SilenceProcessor:
     
     @staticmethod
     def concat_with_silence_removed(video_paths: list, output_path: Path,
-                                    silence_threshold: float = -40.0) -> bool:
+                                    silence_threshold: float = -35.0) -> bool:
         """
         拼接视频并移除静音部分
         
@@ -243,9 +243,9 @@ class SilenceProcessor:
     
     @staticmethod
     def adjust_clip_for_silence(start_time: float, end_time: float, audio_path: Path,
-                               silence_threshold: float = -40.0,
+                               silence_threshold: float = -35.0,
                                buffer_duration: float = 0.2,
-                               long_silence_threshold: float = 3.0) -> Tuple[float, float]:
+                               long_silence_threshold: float = 1.0) -> Tuple[float, float]:
         """
         调整切片时间以移除长静音部分
         

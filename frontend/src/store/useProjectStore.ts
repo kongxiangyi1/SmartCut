@@ -45,7 +45,9 @@ export interface Project {
   }
   created_at: string
   updated_at: string
+  started_at?: string      // 新增
   completed_at?: string
+  execution_duration?: number  // 新增（秒，仅 completed 有值）
   total_clips?: number
   total_collections?: number
   total_tasks?: number

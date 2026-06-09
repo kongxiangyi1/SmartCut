@@ -418,7 +418,7 @@ const UploadModal: React.FC<UploadModalProps> = ({
             percent={uploadProgress.progress}
             status={getProgressStatus()}
             style={{ marginBottom: '24px', height: '8px' }}
-            strokeWidth={8}
+            size={8}
           />
 
           {uploadProgress.status === 'success' && uploadProgress.bvid && (

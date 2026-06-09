@@ -22,6 +22,34 @@ dayjs.extend(timezone)
 dayjs.extend(utc)
 dayjs.locale('zh-cn')
 
+/**
+ * 将秒数格式化为人类可读的耗时文本
+ * 
+ * Examples:
+ *   45 → "45秒"
+ *   208 → "3分28秒"
+ *   7322 → "2小时2分2秒"
+ */
+function formatDuration(seconds: number): string {
+  if (seconds < 0 || seconds == null) return ''
+  
+  if (seconds < 60) {
+    return `${Math.round(seconds)}秒`
+  }
+  
+  const totalSeconds = Math.round(seconds)
+  const minutes = Math.floor(totalSeconds / 60)
+  const secs = totalSeconds % 60
+  
+  if (minutes < 60) {
+    return `${minutes}分${secs}秒`
+  }
+  
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  return `${hours}小时${mins}分${secs}秒`
+}
+
 // 添加CSS动画样式
 const pulseAnimation = `
   @keyframes pulse {
@@ -47,8 +75,7 @@ if (typeof document !== 'undefined') {
   document.head.appendChild(style)
 }
 
-const { Text, Title } = Typography
-const { Meta } = Card
+const { Text } = Typography
 
 interface ProjectCardProps {
   project: Project
@@ -70,7 +97,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
   const [thumbnailLoading, setThumbnailLoading] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [currentLogIndex, setCurrentLogIndex] = useState(0)
+  const [, setCurrentLogIndex] = useState(0)
 
   // 获取分类信息
   const getCategoryInfo = (category?: string) => {
@@ -127,7 +154,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
             project.video_path ? project.video_path.split(/[\\/]/).pop() : null, // 尝试从完整路径中提取文件名
             project.video_path,
             `${project.video_path}/input.mp4`
-          ].filter(Boolean)
+          ].filter((p): p is string => p != null)
         
         let videoLoaded = false
         
@@ -270,17 +297,6 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
     return () => clearInterval(interval)
   }, [logs.length])
 
-  const getStatusColor = (status: Project['status']) => {
-    switch (status) {
-      case 'completed': return 'success'
-      case 'processing': return 'processing'
-      case 'error': return 'error'
-      case 'uploading': return 'default'
-      default: return 'default'
-    }
-  }
-
-  // 检查是否是等待处理状态 - pending状态显示为导入中
   const isImporting = project.status === 'pending'
   
   // 状态标准化处理 - pending状态显示为导入中
@@ -707,7 +723,8 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
               </div>
             </div>
           ) : (
-            // 其他状态：显示状态块 + 切片数 + 合集数
+            // 其他状态：显示状态块 + 切片数 + 合集数 + 处理耗时
+            <>
             <div style={{ 
               display: 'flex', 
               gap: '6px',
@@ -764,6 +781,25 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
                 </div>
               </div>
             </div>
+
+            {/* 处理耗时（仅 completed 状态显示） */}
+            {project.status === 'completed' && project.execution_duration != null && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                marginTop: '6px',
+                padding: '4px 10px',
+                background: 'rgba(82, 196, 26, 0.08)',
+                border: '1px solid rgba(82, 196, 26, 0.15)',
+                borderRadius: '4px',
+              }}>
+                <span style={{ fontSize: '12px', color: '#52c41a', fontWeight: 500 }}>
+                  处理耗时: {formatDuration(project.execution_duration)}
+                </span>
+              </div>
+            )}
+            </>
           )}
 
           {/* 详细进度显示已隐藏 - 只在状态块中显示百分比 */}

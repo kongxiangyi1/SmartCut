@@ -59,6 +59,7 @@ def get_llm_config_status():
             'zhipu': 'api_zhipu_api_key',
             'tencent': 'api_tencent_api_key',
             'deepseek': 'api_deepseek_api_key',
+            'moark': 'api_moark_api_key',
             'ollama': 'api_ollama_api_key',
             'lmstudio': 'api_lmstudio_api_key',
         }
@@ -221,6 +222,7 @@ def get_settings():
             "api_zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "api_tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
             "api_deepseek_api_key": secure_manager.get_sensitive_value('api_deepseek_api_key'),
+            "api_moark_api_key": secure_manager.get_sensitive_value('api_moark_api_key'),
             "api_ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
             "api_lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
             # 同时返回无 api_ 前缀的格式兼容前端
@@ -231,6 +233,7 @@ def get_settings():
             "zhipu_api_key": secure_manager.get_sensitive_value('api_zhipu_api_key'),
             "tencent_api_key": secure_manager.get_sensitive_value('api_tencent_api_key'),
             "deepseek_api_key": secure_manager.get_sensitive_value('api_deepseek_api_key'),
+            "moark_api_key": secure_manager.get_sensitive_value('api_moark_api_key'),
             "ollama_api_key": secure_manager.get_sensitive_value('api_ollama_api_key'),
             "lmstudio_api_key": secure_manager.get_sensitive_value('api_lmstudio_api_key'),
             "ollama_base_url": secure_manager.get('ollama_base_url', 'http://localhost:11434/v1'),
@@ -262,6 +265,7 @@ def update_settings(settings_data: Dict[str, Any]):
             'siliconflow_api_key': 'api_siliconflow_api_key',
             'zhipu_api_key': 'api_zhipu_api_key',
             'tencent_api_key': 'api_tencent_api_key',
+            'moark_api_key': 'api_moark_api_key',
             'ollama_api_key': 'api_ollama_api_key',
             'lmstudio_api_key': 'api_lmstudio_api_key',
         }
@@ -299,11 +303,14 @@ def _sync_settings_to_json(settings_data: Dict[str, Any]):
     """将非敏感配置同步到 settings.json（供 LLMManager 读取）"""
     try:
         settings_path = Path(__file__).parent.parent.parent.parent / "data" / "settings.json"
-        if not settings_path.exists():
-            return
 
-        with open(settings_path, 'r', encoding='utf-8') as f:
-            current = json.load(f)
+        # 读取现有配置，或创建空配置
+        if settings_path.exists():
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                current = json.load(f)
+        else:
+            current = {}
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 只同步非敏感字段（敏感字段由 secure_config_manager 管理）
         sync_fields = {'llm_provider', 'model_name', 'ollama_base_url', 'lmstudio_base_url',
@@ -645,6 +652,8 @@ def get_current_provider():
             'siliconflow': 'api_siliconflow_api_key',
             'zhipu': 'api_zhipu_api_key',
             'tencent': 'api_tencent_api_key',
+            'deepseek': 'api_deepseek_api_key',
+            'moark': 'api_moark_api_key',
             'ollama': 'api_ollama_api_key',
             'lmstudio': 'api_lmstudio_api_key',
         }
@@ -667,6 +676,7 @@ def get_current_provider():
             "siliconflow": "硅基流动",
             "tencent": "腾讯混元",
             "deepseek": "DeepSeek",
+            "moark": "模力方舟",
             "ollama": "本地Ollama",
             "lmstudio": "本地LM Studio"
         }

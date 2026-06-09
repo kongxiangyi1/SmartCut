@@ -4,6 +4,7 @@ LLM管理器 - 统一管理多个模型提供商
 import json
 import logging
 import os
+import threading
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -96,12 +97,27 @@ class LLMManager:
                         provider_type, effective_api_key, model_name
                     )
                 logger.info(f"已初始化{provider_type.value}提供商，模型: {model_name}")
+                if provider_type in (ProviderType.OLLAMA, ProviderType.LMSTUDIO):
+                    self._trigger_warmup(provider_type)
             else:
                 logger.warning(f"未找到{provider_type.value}的API密钥")
                 
         except Exception as e:
             logger.error(f"初始化提供商失败: {e}")
             self.current_provider = None
+
+    def _trigger_warmup(self, provider_type: ProviderType):
+        """后台线程预热本地模型"""
+        def _do_warmup():
+            try:
+                logger.info(f"{provider_type.value} 模型预热中（后台线程）...")
+                self.current_provider.warmup()
+                logger.info(f"{provider_type.value} 模型预热完成")
+            except Exception as e:
+                logger.warning(f"{provider_type.value} 模型预热异常: {e}")
+
+        thread = threading.Thread(target=_do_warmup, daemon=True, name=f"warmup-{provider_type.value}")
+        thread.start()
 
     def _get_api_key_for_provider(self, provider_type: ProviderType) -> Optional[str]:
         """获取指定提供商的API密钥"""
@@ -113,6 +129,7 @@ class LLMManager:
             ProviderType.ZHIPU: "zhipu_api_key",
             ProviderType.TENCENT: "tencent_api_key",
             ProviderType.DEEPSEEK: "deepseek_api_key",
+            ProviderType.MOARK: "moark_api_key",
             ProviderType.OLLAMA: "ollama_api_key",
             ProviderType.LMSTUDIO: "lmstudio_api_key",
         }
@@ -145,6 +162,8 @@ class LLMManager:
                 ProviderType.SILICONFLOW: "siliconflow_api_key",
                 ProviderType.ZHIPU: "zhipu_api_key",
                 ProviderType.TENCENT: "tencent_api_key",
+                ProviderType.DEEPSEEK: "deepseek_api_key",
+                ProviderType.MOARK: "moark_api_key",
                 ProviderType.OLLAMA: "ollama_api_key",
                 ProviderType.LMSTUDIO: "lmstudio_api_key",
             }
@@ -240,6 +259,7 @@ class LLMManager:
             ProviderType.ZHIPU: "智谱AI",
             ProviderType.TENCENT: "腾讯混元",
             ProviderType.DEEPSEEK: "DeepSeek",
+            ProviderType.MOARK: "模力方舟",
             ProviderType.OLLAMA: "本地Ollama",
             ProviderType.LMSTUDIO: "本地LM Studio"
         }

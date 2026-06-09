@@ -82,6 +82,54 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         
         return self.update(project_id, **orm_data)
     
+    @staticmethod
+    def _calculate_execution_duration(project) -> Optional[float]:
+        """
+        计算项目执行耗时（秒）
+
+        规则:
+        - completed 状态: completed_at - started_at
+        - processing 状态: now - started_at（实时耗时）
+        - 其他状态 / started_at 为 None: None
+
+        Args:
+            project: Project 模型实例
+
+        Returns:
+            耗时秒数（保留 1 位小数），或 None
+        """
+        started_at = getattr(project, 'started_at', None)
+        if started_at is None:
+            return None
+
+        from datetime import datetime, timezone
+
+        status = getattr(project, 'status', None)
+        end_time = None
+
+        if status == 'completed':
+            completed_at = getattr(project, 'completed_at', None)
+            if completed_at:
+                end_time = completed_at
+        elif status == 'processing':
+            end_time = datetime.now(timezone.utc)
+
+        if end_time is None:
+            return None
+
+        # 确保两个时间都是 aware datetime（SQLite 返回 naive）
+        started = started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
+        duration = (end_time - started).total_seconds()
+        if duration < 0:
+            return None  # 异常场景
+
+        return round(duration, 1)
+
     def get_project_with_stats(self, project_id: str) -> Optional[ProjectResponse]:
         """Get project with statistics."""
         project = self.get(project_id)
@@ -138,7 +186,9 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             settings=getattr(project, 'processing_config', {}) or {},
             created_at=self._convert_utc_to_local(getattr(project, 'created_at', None)),
             updated_at=self._convert_utc_to_local(getattr(project, 'updated_at', None)),
+            started_at=getattr(project, 'started_at', None),
             completed_at=self._convert_utc_to_local(getattr(project, 'completed_at', None)),
+            execution_duration=self._calculate_execution_duration(project),
             total_clips=total_clips,
             clip_count=total_clips,
             total_collections=total_collections,
@@ -221,7 +271,9 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
                 settings=getattr(project, 'processing_config', {}) or {},
                 created_at=self._convert_utc_to_local(getattr(project, 'created_at', None)),
                 updated_at=self._convert_utc_to_local(getattr(project, 'updated_at', None)),
+                started_at=getattr(project, 'started_at', None),
                 completed_at=self._convert_utc_to_local(getattr(project, 'completed_at', None)),
+                execution_duration=self._calculate_execution_duration(project),
                 total_clips=total_clips,
                 clip_count=total_clips,
                 total_collections=total_collections,

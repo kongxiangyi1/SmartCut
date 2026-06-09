@@ -515,7 +515,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
             trailColor="#404040"
             showInfo={false}
             style={{ marginBottom: '8px', height: '6px' }}
-            strokeWidth={6}
+            size={6}
           />
           <Text style={{ color: '#cccccc', fontSize: '13px', marginTop: '8px', display: 'block', textAlign: 'center' }}>
             正在导入文件，请稍候...

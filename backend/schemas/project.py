@@ -63,7 +63,13 @@ class ProjectResponse(BaseSchema):
     settings: dict = Field(description="Project settings")
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: datetime = Field(description="Last update timestamp")
+    started_at: Optional[datetime] = Field(
+        default=None, description="处理开始时间戳"
+    )
     completed_at: Optional[datetime] = Field(description="Completion timestamp")
+    execution_duration: Optional[float] = Field(
+        default=None, description="处理耗时（秒），仅 completed 状态有值"
+    )
     
     class Config:
         json_encoders = {

@@ -171,6 +171,13 @@ class Project(BaseModel):
         comment="处理配置"
     )
     
+    # 处理开始时间
+    started_at = Column(
+        DateTime, 
+        nullable=True, 
+        comment="处理开始时间"
+    )
+
     # 完成时间
     completed_at = Column(
         DateTime, 

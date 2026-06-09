@@ -154,6 +154,22 @@ SLIDING_WINDOW = {
     "anchor_window_size": 30,     # 锚点检测窗口（秒）
 }
 
+# 静音移除处理配置
+SILENCE_PROCESSING = {
+    "enabled": True,                    # 是否启用静音移除后处理
+    "long_silence_threshold": 1.0,      # 超过此秒数的静音将被去除
+    "short_silence_keep": 0.8,          # 间隔 ≤ 此值的相邻语音段合并保留（让视频更自然）
+    "buffer_duration": 0.2,             # 语音区间前后保留的缓冲时间（秒）
+}
+
+# Silero VAD 配置
+SILERO_VAD_CONFIG = {
+    "onnx": True,                       # 使用 ONNX 模式（无需 torch）
+    "threshold": 0.5,                   # 检测灵敏度 (0-1)，越低越敏感
+    "min_speech_duration_ms": 300,      # 最短语音段（毫秒）
+    "min_silence_duration_ms": 500,     # 最短静音段（毫秒）
+}
+
 # 确保输出目录存在
 for dir_path in [CLIPS_DIR, COLLECTIONS_DIR, METADATA_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)

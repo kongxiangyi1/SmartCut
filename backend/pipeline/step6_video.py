@@ -59,8 +59,24 @@ class VideoGenerator:
                 'original_end': clip['end_time']
             })
         
+        # 查找 P1 生成的 .vad.json
+        vad_path = None
+        # 尝试多个可能位置（从输入视频路径推测）
+        input_video_path = input_video
+        for candidate in [
+            input_video_path.parent / f"{input_video_path.stem}_audio.wav.vad.json",
+            input_video_path.parent / "input_audio.wav.vad.json",
+        ]:
+            if candidate.exists():
+                vad_path = candidate
+                logger.info(f"找到 P1 VAD 结果: {vad_path}")
+                break
+
         # 批量生成切片（关键帧对齐和静音处理会修改时间）
-        successful_clips, processed_clips_data = self.video_processor.batch_extract_clips(input_video, clips_data)
+        successful_clips, processed_clips_data = self.video_processor.batch_extract_clips(
+            input_video, clips_data,
+            full_audio_vad_path=vad_path,
+        )
         
         # 更新 clips_with_titles 中的实际切割时间
         for clip in clips_with_titles:
