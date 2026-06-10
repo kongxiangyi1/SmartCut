@@ -472,16 +472,29 @@ class VideoProcessor:
             if nxt_start_sec >= cur_end_sec:
                 continue
 
-            # 存在重叠 → 在中间点分割
-            mid = (cur_end_sec + nxt_start_sec) / 2.0
-            new_cur_end = _to_time_str(mid - 0.05)
-            new_nxt_start = _to_time_str(mid + 0.05)
+            # 存在重叠 → 优先尝试恢复到原始边界
+            # 中点分割在关键帧间隔较大时，分割点仍可能落在另一话题区域内
+            new_cur_end_candidate = min(cur_end_sec, cur_orig_end_sec)
+            new_nxt_start_candidate = max(nxt_start_sec, nxt_orig_start_sec)
 
-            logger.info(
-                f"去重叠: Clip {cur.get('id','?')} end {cur['end_time']} → {new_cur_end}, "
-                f"Clip {nxt.get('id','?')} start {nxt['start_time']} → {new_nxt_start}, "
-                f"重叠量 {cur_end_sec - nxt_start_sec:.2f}s"
-            )
+            if new_cur_end_candidate <= new_nxt_start_candidate:
+                # 恢复到原始边界后无重叠（或相邻）→ 使用原始边界
+                new_cur_end = _to_time_str(max(new_cur_end_candidate - 0.05, 0.0))
+                new_nxt_start = _to_time_str(new_nxt_start_candidate + 0.05)
+                logger.info(
+                    f"去重叠(恢复原边界): Clip {cur.get('id','?')} end {cur['end_time']} → {new_cur_end}, "
+                    f"Clip {nxt.get('id','?')} start {nxt['start_time']} → {new_nxt_start}"
+                )
+            else:
+                # 原始边界本身也重叠 → 在中间点分割
+                mid = (cur_end_sec + nxt_start_sec) / 2.0
+                new_cur_end = _to_time_str(mid - 0.05)
+                new_nxt_start = _to_time_str(mid + 0.05)
+                logger.info(
+                    f"去重叠(中点分割): Clip {cur.get('id','?')} end {cur['end_time']} → {new_cur_end}, "
+                    f"Clip {nxt.get('id','?')} start {nxt['start_time']} → {new_nxt_start}, "
+                    f"重叠量 {cur_end_sec - nxt_start_sec:.2f}s"
+                )
 
             cur['end_time'] = new_cur_end
             nxt['start_time'] = new_nxt_start
