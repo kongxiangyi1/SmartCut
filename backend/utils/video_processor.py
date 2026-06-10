@@ -197,17 +197,14 @@ class VideoProcessor:
             ffmpeg_start_time = VideoProcessor.convert_seconds_to_ffmpeg_time(start_sec)
             ffmpeg_duration = f"{duration:.3f}"
 
-            # 帧精确切割：-ss 在 -i 前快速跳转到最近关键帧，-c:v libx264 重新编码确保帧精确输出
+            # 流拷贝切割：KeyframeAligner已确保边界对齐到关键帧，
+            # 使用 -c copy 避免重编码，速度从分钟级降到秒级
             cmd = [
                 'ffmpeg',
                 '-ss', ffmpeg_start_time,
                 '-i', str(input_video),
                 '-t', ffmpeg_duration,
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-c:a', 'aac',
-                '-b:a', '192k',
+                '-c', 'copy',
                 '-y',
                 str(output_path)
             ]
