@@ -394,6 +394,106 @@ class VideoProcessor:
             logger.error(f"获取视频信息异常: {str(e)}")
             return {}
     
+    @staticmethod
+    def _deduplicate_aligned_boundaries(aligned_clips: List[Dict]) -> List[Dict]:
+        """
+        关键帧对齐后的相邻切片去重叠处理 + 间隙保护。
+
+        功能：
+          1. 去重叠：当切片N的对齐结束时间 > 切片N+1的对齐开始时间时，在中间点分割
+          2. 间隙保护：当LLM输出在两个切片间留有间隙（即原边界处有被排除的内容）时，
+             阻止关键帧对齐将任何切片扩张到间隙中。
+
+        Args:
+            aligned_clips: 关键帧对齐后的切片数据列表
+
+        Returns:
+            去重叠+间隙保护后的切片数据列表
+        """
+        if len(aligned_clips) < 2:
+            return aligned_clips
+
+        def _to_seconds(t: object) -> float:
+            if isinstance(t, (int, float)):
+                return float(t)
+            if isinstance(t, str):
+                t_str = t.replace(',', '.')
+                parts = t_str.split(':')
+                if len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                try:
+                    return float(t_str)
+                except (ValueError, TypeError):
+                    return 0.0
+            return 0.0
+
+        def _to_time_str(sec: float) -> str:
+            h = int(sec // 3600)
+            m = int((sec % 3600) // 60)
+            s = sec % 60
+            ms = int(round((s - int(s)) * 1000))
+            return f"{h:02d}:{m:02d}:{int(s):02d}.{ms:03d}"
+
+        # 按开始时间排序（确保处理顺序）
+        sorted_clips = sorted(aligned_clips, key=lambda c: _to_seconds(c.get('start_time', 0)))
+
+        any_fixed = False
+        for i in range(len(sorted_clips) - 1):
+            cur = sorted_clips[i]
+            nxt = sorted_clips[i + 1]
+
+            cur_end_sec = _to_seconds(cur['end_time'])
+            nxt_start_sec = _to_seconds(nxt['start_time'])
+            cur_orig_end_sec = _to_seconds(cur.get('original_end', cur['end_time']))
+            nxt_orig_start_sec = _to_seconds(nxt.get('original_start', nxt['start_time']))
+
+            # ── 间隙保护 ──
+            # LLM 在两个 clip 之间留有间隙(original_end_N < original_start_N+1)，
+            # 说明间隙中的内容被 LLM 明确排除。
+            # 关键帧对齐不应让任何 clip 扩张到间隙中。
+            if cur_orig_end_sec < nxt_orig_start_sec:
+                if cur_end_sec > cur_orig_end_sec:
+                    new_cur_end = _to_time_str(max(cur_orig_end_sec - 0.05, 0.0))
+                    logger.info(
+                        f"间隙保护: Clip {cur.get('id','?')} end {cur['end_time']} → {new_cur_end}, "
+                        f"原边界 {cur.get('original_end','?')}"
+                    )
+                    cur['end_time'] = new_cur_end
+                    cur_end_sec = cur_orig_end_sec  # 更新用于后续去重叠判断
+                    any_fixed = True
+                if nxt_start_sec < nxt_orig_start_sec:
+                    new_nxt_start = _to_time_str(nxt_orig_start_sec + 0.05)
+                    logger.info(
+                        f"间隙保护: Clip {nxt.get('id','?')} start {nxt['start_time']} → {new_nxt_start}, "
+                        f"原边界 {nxt.get('original_start','?')}"
+                    )
+                    nxt['start_time'] = new_nxt_start
+                    nxt_start_sec = nxt_orig_start_sec  # 更新用于后续去重叠判断
+                    any_fixed = True
+
+            # ── 去重叠（间隙保护后仍需检查，因为原始边界也可能重叠） ──
+            if nxt_start_sec >= cur_end_sec:
+                continue
+
+            # 存在重叠 → 在中间点分割
+            mid = (cur_end_sec + nxt_start_sec) / 2.0
+            new_cur_end = _to_time_str(mid - 0.05)
+            new_nxt_start = _to_time_str(mid + 0.05)
+
+            logger.info(
+                f"去重叠: Clip {cur.get('id','?')} end {cur['end_time']} → {new_cur_end}, "
+                f"Clip {nxt.get('id','?')} start {nxt['start_time']} → {new_nxt_start}, "
+                f"重叠量 {cur_end_sec - nxt_start_sec:.2f}s"
+            )
+
+            cur['end_time'] = new_cur_end
+            nxt['start_time'] = new_nxt_start
+            any_fixed = True
+
+        if any_fixed:
+            logger.info("关键帧对齐后处理完成（去重+间隙保护）")
+        return sorted_clips
+
     def batch_extract_clips(
         self,
         input_video: Path,
@@ -422,6 +522,9 @@ class VideoProcessor:
             keyframe_aligner.ensure_initialized()
             aligned_clips_data = keyframe_aligner.align_clips(clips_data, strategy="balanced")
             logger.info(f"关键帧对齐完成，共{len(aligned_clips_data)}个切片")
+            # 关键帧对齐后去重叠：防止相邻切片因各自对齐关键帧而产生内容重叠
+            aligned_clips_data = VideoProcessor._deduplicate_aligned_boundaries(aligned_clips_data)
+            logger.info(f"边界去重叠完成，共{len(aligned_clips_data)}个切片")
         except Exception as e:
             logger.warning(f"关键帧对齐失败，将使用原始时间: {e}")
             aligned_clips_data = clips_data
