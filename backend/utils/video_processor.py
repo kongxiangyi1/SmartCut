@@ -392,6 +392,126 @@ class VideoProcessor:
             return {}
     
     @staticmethod
+    def process_clip_with_srt_vad(
+        input_video: Path,
+        output_path: Path,
+        clip_start_sec: float,
+        clip_end_sec: float,
+        full_speech_segments: List[Tuple[float, float]],
+        encoder: str = "libx264",
+        preset: str = "fast",
+        short_gap_threshold: float = 0.8,
+    ) -> bool:
+        """
+        基于 SRT 边界 + VAD 语音段，单次 ffmpeg 调用完成裁剪+去静音。
+
+        与旧流程的区别：
+          - 跳过 extract_clip（不再产生临时文件）
+          - 跳过 KeyframeAligner（SRT 边界直接做 clip 边界）
+          - 跳过 _deduplicate_aligned_boundaries（无关键帧扩张，无需去重）
+          - filter_complex 直接以原视频为源，trim → concat → encode
+
+        Args:
+            input_video: 原始视频路径
+            output_path: 输出视频路径
+            clip_start_sec: SRT 对齐的 clip 起始时间（全局时间，秒）
+            clip_end_sec: SRT 对齐的 clip 结束时间（全局时间，秒）
+            full_speech_segments: 全视频 VAD 语音段 [(start_sec, end_sec), ...]
+            encoder: 视频编码器
+            preset: 编码预设
+            short_gap_threshold: 短间隔合并阈值（秒）
+
+        Returns:
+            是否成功
+        """
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # --- Step 1: 筛选 clip 范围内的 VAD 语音段 ---
+            clip_speech = []
+            for s, e in full_speech_segments:
+                if e > clip_start_sec and s < clip_end_sec:
+                    # 裁剪到 clip 边界内
+                    cs = max(s, clip_start_sec)
+                    ce = min(e, clip_end_sec)
+                    if ce > cs:
+                        clip_speech.append((cs, ce))
+
+            if not clip_speech:
+                logger.warning(
+                    f"SRT+VAD: clip [{clip_start_sec:.1f}-{clip_end_sec:.1f}] "
+                    f"内无 VAD 语音段，跳过"
+                )
+                return False
+
+            # --- Step 2: 合并短间隔 ---
+            merged = [list(clip_speech[0])]
+            for s, e in clip_speech[1:]:
+                gap = s - merged[-1][1]
+                if gap <= short_gap_threshold:
+                    merged[-1][1] = e
+                else:
+                    merged.append([s, e])
+
+            saved_segments = len(clip_speech) - len(merged)
+            if saved_segments:
+                logger.debug(
+                    f"SRT+VAD: 合并 {saved_segments} 个短间隔 (≤{short_gap_threshold}s)"
+                )
+
+            # --- Step 3: 构建 filter_complex ffmpeg 命令 ---
+            # 每个语音段作为一个输入流，全部指向原视频
+            inputs = []
+            filter_parts = []
+            for i, (start, end) in enumerate(merged):
+                dur = end - start
+                inputs.extend([
+                    "-ss", f"{start:.3f}",
+                    "-t", f"{dur:.3f}",
+                    "-i", str(input_video),
+                ])
+                filter_parts.append(f"[{i}:v][{i}:a]")
+
+            filter_graph = (
+                "".join(filter_parts)
+                + f"concat=n={len(merged)}:v=1:a=1[outv][outa]"
+            )
+
+            cmd = [
+                "ffmpeg",
+                *inputs,
+                "-filter_complex", filter_graph,
+                "-map", "[outv]",
+                "-map", "[outa]",
+                "-c:v", encoder,
+                "-preset", preset,
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-y",
+                str(output_path),
+            ]
+
+            logger.info(
+                f"SRT+VAD: Clip [{clip_start_sec:.1f}-{clip_end_sec:.1f}] "
+                f"{len(merged)}段 ({len(clip_speech)}原始), "
+                f"总语音 {sum(e-s for s,e in merged):.1f}s"
+            )
+
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+
+            if result.returncode == 0:
+                logger.info(f"SRT+VAD: 输出 {output_path}")
+                return True
+            else:
+                logger.error(f"SRT+VAD 失败: {result.stderr[-500:]}")
+                return False
+
+        except Exception as e:
+            logger.error(f"SRT+VAD 异常: {e}")
+            return False
+
+    @staticmethod
     def _deduplicate_aligned_boundaries(aligned_clips: List[Dict]) -> List[Dict]:
         """
         关键帧对齐后的相邻切片去重叠处理 + 间隙保护。
@@ -510,15 +630,26 @@ class VideoProcessor:
         clips_data: List[Dict],
         apply_silence_processing: bool = True,
         full_audio_vad_path: Optional[Path] = None,  # ← 新增
+        enable_srt_vad_pipeline: bool = True,  # ← 新增：开启SRT边界+VAD单步流程
     ) -> Tuple[List[Path], List[Dict]]:
         """
-        批量提取视频片段（支持关键帧对齐 + 静音移除后处理）
+        批量提取视频片段。支持两种流水线：
+
+        1. **SRT+VAD单步流程 (默认，当full_audio_vad_path存在时)**
+           - 直接使用 step5 对齐到 SRT 的边界，跳过 KeyframeAligner
+           - 用预计算全视频 VAD 筛选语音段，单次 ffmpeg trim+concat → 输出
+           - 跳过：extract_clip 临时文件、keyframe对齐、去重叠、静音二次处理
+
+        2. **旧流程 (回退)**
+           - KeyframeAligner对齐边界 → _deduplicate → extract_clip → VAD去除
+           - 保留用于兼容性
 
         Args:
             input_video: 输入视频路径
-            clips_data: 片段数据列表
+            clips_data: 片段数据列表 (start_time, end_time已是step5 SRT对齐后的时间)
             apply_silence_processing: 是否对提取后的切片应用静音移除处理
             full_audio_vad_path: .vad.json 路径（P1 预计算 VAD 结果）
+            enable_srt_vad_pipeline: 是否启用SRT+VAD单步流程（默认True）
 
         Returns:
             元组 (成功提取的片段路径列表, 处理后的片段数据列表)
@@ -526,6 +657,96 @@ class VideoProcessor:
         successful_clips = []
         processed_clips_data = []
 
+        # 检测是否能走 SRT+VAD 单步流程
+        use_srt_vad = (
+            enable_srt_vad_pipeline
+            and apply_silence_processing
+            and full_audio_vad_path
+            and full_audio_vad_path.exists()
+        )
+
+        # 加载 P1 VAD 结果（必须才能走单步流程）
+        full_speech_vad = None
+        if full_audio_vad_path and full_audio_vad_path.exists():
+            try:
+                from backend.utils.silero_vad_wrapper import SileroVADWrapper
+                full_speech_vad = SileroVADWrapper.load_vad_json(full_audio_vad_path)
+                if use_srt_vad:
+                    logger.info(
+                        f"启用 SRT+VAD 单步流程: {len(full_speech_vad)} 段语音, "
+                        f"来源: {full_audio_vad_path}"
+                    )
+                else:
+                    logger.info(
+                        f"加载 P1 VAD 结果 (回退流程复用): {len(full_speech_vad)} 段语音"
+                    )
+            except Exception as e:
+                logger.warning(f"加载 VAD 结果失败: {e}，将使用回退流程")
+                use_srt_vad = False
+                full_speech_vad = None
+
+        # --- SRT+VAD 单步流程 ---
+        if use_srt_vad:
+            for clip_data in clips_data:
+                clip_id = clip_data['id']
+                title = clip_data.get('title', f"片段_{clip_id}")
+                start_time = clip_data['start_time']
+                end_time = clip_data['end_time']
+                original_start = clip_data.get('original_start', start_time)
+                original_end = clip_data.get('original_end', end_time)
+
+                try:
+                    clip_start_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                        VideoProcessor.convert_srt_time_to_ffmpeg_time(str(start_time))
+                    ) if isinstance(start_time, str) else float(start_time)
+                    clip_end_sec = VideoProcessor.convert_ffmpeg_time_to_seconds(
+                        VideoProcessor.convert_srt_time_to_ffmpeg_time(str(end_time))
+                    ) if isinstance(end_time, str) else float(end_time)
+                except Exception:
+                    logger.error(f"时间转换失败: {start_time} → {end_time}, 跳过")
+                    continue
+
+                safe_title = VideoProcessor.sanitize_filename(title)
+                output_path = self.clips_dir / f"{clip_id}_{safe_title}.mp4"
+
+                logger.info(
+                    f"SRT+VAD: 生成切片 {clip_id}: {start_time} -> {end_time}, "
+                    f"输出: {output_path}"
+                )
+
+                if VideoProcessor.process_clip_with_srt_vad(
+                    input_video,
+                    output_path,
+                    clip_start_sec,
+                    clip_end_sec,
+                    full_speech_vad,
+                ):
+                    # 保存元数据
+                    final_start = VideoProcessor.convert_seconds_to_ffmpeg_time(clip_start_sec)
+                    final_end = VideoProcessor.convert_seconds_to_ffmpeg_time(clip_end_sec)
+                    successful_clips.append(output_path)
+                    processed_clips_data.append({
+                        'id': clip_id,
+                        'title': title,
+                        'start_time': final_start,
+                        'end_time': final_end,
+                        'original_start': original_start,
+                        'original_end': original_end,
+                        'output_path': str(output_path),
+                        'pipeline': 'srt_vad_single_step',
+                        'silence_processed': True,
+                    })
+                    logger.info(f"SRT+VAD: 切片 {clip_id} 生成成功")
+                else:
+                    logger.error(f"SRT+VAD: 切片 {clip_id} 生成失败")
+
+            logger.info(
+                f"SRT+VAD批量生成完成，成功 {len(successful_clips)}/{len(clips_data)} 个切片"
+            )
+            return successful_clips, processed_clips_data
+
+        # --- 回退：旧流程 ---
+        logger.info("使用回退流程 (Keyframe对齐 + 两次ffmpeg调用)")
         try:
             cache_dir = input_video.parent / ".keyframe_cache"
             keyframe_aligner = KeyframeAligner(input_video, cache_dir=cache_dir)
@@ -538,16 +759,6 @@ class VideoProcessor:
         except Exception as e:
             logger.warning(f"关键帧对齐失败，将使用原始时间: {e}")
             aligned_clips_data = clips_data
-
-        # 加载 P1 VAD 结果（如果提供）
-        full_audio_vad = None
-        if full_audio_vad_path and full_audio_vad_path.exists():
-            try:
-                from backend.utils.silero_vad_wrapper import SileroVADWrapper
-                full_audio_vad = SileroVADWrapper.load_vad_json(full_audio_vad_path)
-                logger.info(f"加载 P1 VAD 结果: {len(full_audio_vad)} 段语音, 来源: {full_audio_vad_path}")
-            except Exception as e:
-                logger.warning(f"加载 VAD 结果失败: {e}，将使用 FFmpeg 回退")
 
         # 初始化静音处理器（如果需要）
         silence_processor = None
