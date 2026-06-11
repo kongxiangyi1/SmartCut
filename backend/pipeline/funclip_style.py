@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import json
 from backend.pipeline.prompt_loader import get_funclip_prompt
 from backend.pipeline.step6_video import VideoGenerator
@@ -140,6 +140,85 @@ def _deduplicate_clip_segments(merged_clips: List[Dict]) -> List[Dict]:
         logger.info(f"跨clip去重: 移除了{len(merged_clips) - len(result)}个重叠片段")
 
     return result
+
+
+def _generate_silero_vad(video_path: Path, metadata_dir: Path) -> Optional[List[Tuple[float, float]]]:
+    """
+    使用 SileroVAD 对全视频音频进行语音检测，生成 speech_segments 列表。
+
+    优先查找已有 .vad.json 文件；若不存在则运行 SileroVAD 检测并保存结果。
+
+    Args:
+        video_path: 输入视频路径
+        metadata_dir: 元数据目录（vad.json 保存到 metadata_dir / "vad.json"）
+
+    Returns:
+        VAD 语音段列表 [(start_sec, end_sec), ...] 或 None（VAD 不可用时）
+    """
+    import json
+    from backend.utils.silero_vad_wrapper import SileroVADWrapper
+
+    vad_path = metadata_dir / "vad.json"
+
+    # 已有缓存 → 直接加载
+    if vad_path.exists():
+        try:
+            segments = SileroVADWrapper.load_vad_json(vad_path)
+            logger.info(f"复用已有 SileroVAD 数据: {len(segments)} 段语音 ({vad_path})")
+            return segments
+        except Exception as e:
+            logger.warning(f"读取已有 VAD 失败: {e}，将重新生成")
+
+    # 查找音频文件
+    audio_candidates = [
+        video_path.parent / "input_audio.wav",
+        video_path.parent / f"{video_path.stem}_audio.wav",
+    ]
+    audio_path = None
+    for candidate in audio_candidates:
+        if candidate.exists():
+            audio_path = candidate
+            break
+
+    if not audio_path:
+        logger.info("未找到音频文件，跳过 SileroVAD 生成")
+        return None
+
+    # 使用 soundfile 绕过 torchaudio 版本兼容问题
+    try:
+        import soundfile as sf
+        import torch
+        from silero_vad import load_silero_vad, get_speech_timestamps
+
+        logger.info("加载 SileroVAD 模型...")
+        data, sr = sf.read(str(audio_path), dtype='float32')
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        tensor = torch.from_numpy(data)
+        logger.info(f"音频: {len(data)/sr:.1f}s, {sr}Hz")
+
+        model = load_silero_vad(onnx=True)
+        timestamps = get_speech_timestamps(
+            tensor, model,
+            threshold=0.5,
+            min_speech_duration_ms=300,
+            min_silence_duration_ms=500,
+            return_seconds=True,
+        )
+        segments = [(round(t['start'], 3), round(t['end'], 3)) for t in timestamps]
+        logger.info(f"SileroVAD 检测完成: {len(segments)} 段语音, 总时长 {sum(e-s for s,e in segments):.1f}s")
+
+        # 保存为标准 .vad.json 格式
+        SileroVADWrapper.save_vad_json(segments, vad_path)
+        logger.info(f"VAD 结果已保存: {vad_path}")
+        return segments
+
+    except ImportError as e:
+        logger.warning(f"SileroVAD 依赖缺失 ({e})，跳过 VAD 生成，将回退到旧流程")
+        return None
+    except Exception as e:
+        logger.warning(f"SileroVAD 生成失败: {e}，将回退到旧流程")
+        return None
 
 
 def _apply_silence_processing(processor, output_path: Path, clip_id: str) -> None:
@@ -2898,13 +2977,31 @@ def run_funclip_pipeline(srt_path: Path,
     _prepopulate_removed_sections(clips_for_video, video_path, metadata_dir, temp_dir)
     # ──────────────────────────────
 
+    # ── 生成/加载 SileroVAD 全局语音段（用于 SRT+VAD 单步流程）──
+    full_speech_segments = _generate_silero_vad(video_path, metadata_dir)
+    if full_speech_segments:
+        logger.info(
+            f"SRT+VAD 单步流程可用: {len(full_speech_segments)} 段语音, "
+            f"总时长 {sum(e-s for s,e in full_speech_segments):.1f}s"
+        )
+    else:
+        logger.info("SRT+VAD 单步流程不可用，将使用原有静音后处理方式")
+    # ────────────────────────────────────────────────────────────
+
     # ── 视频切割并行化（ThreadPoolExecutor，max_workers=2） ──
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
     _results_lock = threading.Lock()
 
-    def _process_single_clip(video_clip: dict) -> List[Any]:
-        """处理单个切片提取，返回 [successful_path or None, processed_data or None]"""
+    def _process_single_clip(
+        video_clip: dict,
+        full_speech_segments: Optional[List[Tuple[float, float]]] = None
+    ) -> List[Any]:
+        """处理单个切片提取，返回 [successful_path or None, processed_data or None]
+
+        如果有全局 VAD full_speech_segments，对于单段切片直接走 SRT+VAD 单步流程，
+        无需二次静音后处理，直接输出最终文件。
+        """
         segments = video_clip.get('_segments', None)
         removed = video_clip.get('_removed_sections', [])
         clip_id = video_clip['id']
@@ -2921,6 +3018,46 @@ def run_funclip_pipeline(srt_path: Path,
             logger.warning(f"切片 {video_clip['id']} 无有效段（_segments为空），跳过")
             return [None, None]
 
+        # ── 尝试 SRT+VAD 单步流程 ──
+        # 条件：1. 有全局 VAD 语音段；2. 只有一个有效段（整个切片是一个连续话题）
+        if full_speech_segments and len(effective_segments) == 1:
+            logger.info(f"单段切片 {clip_id}: 使用 SRT+VAD 单步流程...")
+            # 话题边界已经通过 SRT 对齐，取出整体起始结束
+            start_srt = effective_segments[0]['start']
+            end_srt = effective_segments[0]['end']
+            clip_start_sec = _srt_time_to_seconds(start_srt)
+            clip_end_sec = _srt_time_to_seconds(end_srt)
+
+            # 直接调用 SRT+VAD 单步流程：
+            #   - 筛选 clip 内 VAD 语音段
+            #   - 合并短间隔 → ffmpeg trim+concat 单次输出
+            success = VP.process_clip_with_srt_vad(
+                input_video=video_path,
+                output_path=output_path,
+                clip_start_sec=clip_start_sec,
+                clip_end_sec=clip_end_sec,
+                full_speech_segments=full_speech_segments,
+            )
+
+            if success:
+                data = {
+                    'id': clip_id,
+                    'title': title,
+                    'start_time': start_srt,
+                    'end_time': end_srt,
+                    'output_path': str(output_path),
+                    'keyframe_aligned': False,
+                    'multi_segment': False,
+                    'srt_vad_pipeline': True,
+                }
+                logger.info(f"  单段切片 {clip_id} 提取成功 (SRT+VAD)")
+                # SRT+VAD 已经在提取时去除静音，不需要二次静音后处理
+                return [output_path, data]
+            else:
+                logger.warning(f"  SRT+VAD 失败，回退到原有方式...")
+                # 下面回退到旧流程
+
+        # ── 回退到原有流程 ──
         if len(effective_segments) > 1:
             # 多段不连续：提取每段再拼接
             logger.info(f"多段切片 {clip_id}: {len(effective_segments)} 个有效时间段，正在提取拼接...")
@@ -2983,7 +3120,7 @@ def run_funclip_pipeline(srt_path: Path,
     # 并行执行视频切割
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_to_clip = {
-            executor.submit(_process_single_clip, video_clip): video_clip
+            executor.submit(_process_single_clip, video_clip, full_speech_segments): video_clip
             for video_clip in clips_for_video
         }
         for future in as_completed(future_to_clip):

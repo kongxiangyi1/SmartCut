@@ -45,7 +45,9 @@ class SecureConfigManager:
         'api_zhipu_api_key',
         'api_tencent_api_key',
         'api_deepseek_api_key',
+        'api_moark_api_key',
         'api_ollama_api_key',
+        'api_lmstudio_api_key',
     ]
     
     def __new__(cls):
@@ -220,10 +222,9 @@ class SecureConfigManager:
     def get_sensitive_value(self, key: str) -> str:
         """
         安全获取敏感值
-        解密后立即使用，避免长时间留在内存
+        从内存配置中直接获取（_load_config 已负责解密）
         """
-        encrypted_value = self._config.get(key, "")
-        return self._decrypt(encrypted_value)
+        return self._config.get(key, "")
     
     def mask_sensitive_value(self, key: str) -> str:
         """

@@ -695,7 +695,7 @@ class DataSyncService:
                         project.status = ProjectStatus.COMPLETED
                         project.total_clips = step6_output.get("clips_count", 0)
                         project.total_collections = step6_output.get("collections_count", 0)
-                        project.completed_at = datetime.now()
+                        project.completed_at = datetime.utcnow()
                         
                         self.db.commit()
                         logger.info(f"项目 {project_id} 状态已更新为已完成，切片数: {project.total_clips}, 合集数: {project.total_collections}")
@@ -704,7 +704,7 @@ class DataSyncService:
                         logger.error(f"读取step6输出文件失败: {e}")
                         # 即使读取失败，也标记为已完成
                         project.status = ProjectStatus.COMPLETED
-                        project.completed_at = datetime.now()
+                        project.completed_at = datetime.utcnow()
                         self.db.commit()
                         logger.info(f"项目 {project_id} 状态已更新为已完成（无统计信息）")
                         

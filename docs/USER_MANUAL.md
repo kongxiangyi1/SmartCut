@@ -9,8 +9,21 @@
 3. [功能使用指南](#功能使用指南)
 4. [系统配置](#系统配置)
 5. [API接口说明](#api接口说明)
-6. [故障排除](#故障排除)
-7. [常见问题](#常见问题)
+6. [本地AI模型配置（LM Studio / Ollama）](#6-本地ai模型配置lm-studio--ollama)
+7. [故障排除](#故障排除)
+   - [端口被占用](#711-端口被占用)
+   - [Redis连接失败](#712-redis连接失败)
+   - [YouTube下载失败](#713-youtube下载失败)
+   - [B站下载失败](#714-b站下载失败)
+   - [AI处理速度慢](#715-ai处理速度慢)
+   - [前端构建失败](#716-前端构建失败)
+   - [数据库连接失败](#717-数据库连接失败)
+   - [日志查看](#72-日志查看)
+   - [系统状态检查](#73-系统状态检查)
+8. [常见问题](#常见问题)
+   - [安装和启动问题](#81-安装和启动问题)
+   - [功能使用问题](#82-功能使用问题)
+   - [性能优化](#83-性能优化)
 
 ---
 
@@ -702,11 +715,184 @@ WS /api/v1/ws/{project_id}
 
 ---
 
-## 6. 故障排除
+## 6. 本地AI模型配置（LM Studio / Ollama）
 
-### 6.1 常见问题
+### 6.1 概述
 
-#### 6.1.1 端口被占用
+AutoClip 支持接入本地部署的大语言模型作为 AI 分析引擎，适用于：
+- 数据隐私要求较高，不希望将视频内容发送到云端 API
+- 需要离线运行，无网络环境
+- 使用自有硬件资源，节省 API 调用费用
+
+支持的本地模型提供商：
+- **[LM Studio](https://lmstudio.ai/)**：Windows / macOS 桌面应用，提供 OpenAI 兼容接口
+- **[Ollama](https://ollama.com/)**：跨平台命令行工具，也提供 OpenAI 兼容接口
+
+### 6.2 LM Studio 配置步骤
+
+#### 6.2.1 安装 LM Studio
+
+1. 访问 [https://lmstudio.ai/](https://lmstudio.ai/) 下载对应操作系统的安装包
+2. 安装后启动 LM Studio
+
+#### 6.2.2 下载并加载模型
+
+1. 在 LM Studio 左侧导航栏点击 **🔍 Search**（搜索图标）
+2. 搜索框输入你想要的模型，例如 `Qwen2.5-7B-Instruct` 或 `deepseek-v4-flash`
+3. 点击模型卡片上的 **Download** 按钮下载模型
+4. 下载完成后，点击左侧 **💬 Chat**（聊天图标）
+5. 在顶部的模型选择下拉框中，选择刚才下载的模型
+
+#### 6.2.3 ⚠️ 配置 Context Length（关键步骤）
+
+Context Length（上下文长度）决定了模型一次性可处理的文本量。加载模型后**必须**按以下步骤配置：
+
+1. 在 **💬 Chat** 页面中，点击顶部模型选择框右侧的 **⚙️ 设置图标**（或齿轮图标），打开模型加载参数面板
+2. 找到 **Context Length（上下文长度）** 或 **n_ctx** 输入框
+3. 根据你的硬件配置和视频长度，选择适当的值：
+
+| 视频时长 | 推荐 Context Length | 显存需求（7B模型） |
+|----------|-------------------|-----------------|
+| 短（<5分钟） | 8192 (8K) | ~6GB |
+| 中（5-15分钟） | 16384 (16K) | ~8GB |
+| 长（15-30分钟） | 32768 (32K) | ~12GB |
+| 超长（>30分钟） | 65536 (64K) | ~16GB+ |
+
+4. **重新加载模型**：修改参数后，需要点击 **Reload Model**（重新加载模型）按钮使配置生效
+5. 确认右侧状态栏显示 `n_ctx: 16384`（或你设置的值），表示配置已生效
+
+> **⚠️ 重要**：Context Length 过低（如默认的 4096）会导致流水线处理失败，日志中出现 `n_keep: XXXX >= n_ctx: 4096` 错误。此时需按上述步骤增大 Context Length 并重新加载模型。
+
+#### 6.2.4 启动本地 API 服务
+
+1. 在 LM Studio 左侧点击 **💻 Developer**（开发者模式）图标
+2. 在 **Server** 标签页中：
+   - 确认模型选择器中已选中你要使用的模型
+   - 确认 **Port** 填写为 `1234`（默认值）
+   - 确认 **CORS Origin** 填写为 `*`（或 `http://localhost:3000`）
+3. 点击 **Start Server** 按钮，启动 API 服务
+4. 当状态变为 **Running** 时，API 服务已就绪，地址为 `http://localhost:1234/v1`
+
+#### 6.2.5 在 AutoClip 中配置 LM Studio
+
+1. 在 AutoClip 前端页面，点击顶部的 **设置** 按钮
+2. 进入 **API 配置** 标签页
+3. 在 AI 提供商下拉框中选择 **LM Studio**
+4. 配置以下参数：
+
+| 参数 | 说明 | 填写值 |
+|------|------|--------|
+| API Key | LM Studio 不验证 API Key | 任意值（如 `lmstudio`） |
+| 模型名称 | 你在 LM Studio 中加载的模型名 | 例如 `qwen2.5-7b-instruct` |
+| 基础URL | LM Studio API 服务地址 | `http://localhost:1234/v1` |
+| 最大Token数 | 单次生成的最大输出长度 | `4096`（一般保持默认） |
+
+5. 点击 **测试连接** 按钮，确认显示"连接成功"
+6. 点击 **保存设置**
+
+#### 6.2.6 验证配置
+
+配置完成后，创建一个新的视频处理项目进行验证。关注后端日志中是否有以下信息：
+
+```
+LM Studio 模型预热完成，上下文窗口: 16384
+```
+
+如果出现 `n_ctx: 4096` 或警告日志，说明 Context Length 配置未生效，请返回 6.2.3 重新配置并重新加载模型。
+
+### 6.3 Ollama 配置步骤
+
+#### 6.3.1 安装 Ollama
+
+1. 访问 [https://ollama.com/](https://ollama.com/) 下载安装包
+2. 安装后，打开终端验证：
+   ```bash
+   ollama --version
+   ```
+   
+#### 6.3.2 下载并运行模型
+
+```bash
+# 下载并运行 Qwen2.5 7B（推荐）
+ollama run qwen2.5
+
+# 其他可选模型
+ollama run qwen2.5:7b    # 7B 参数版
+ollama run qwen2.5:14b   # 14B 参数版（需要更多显存）
+
+# 模型下载完成后，Ollama 自动启动 API 服务
+# 默认地址: http://localhost:11434
+```
+
+#### 6.3.3 配置 Context Length
+
+Ollama 默认的 Context Length 为 2048，需要手动修改：
+
+```bash
+# 方式一：通过环境变量设置（推荐）
+# 在启动 AutoClip 前设置
+set OLLAMA_CONTEXT_LENGTH=16384    # Windows PowerShell
+# 或
+export OLLAMA_CONTEXT_LENGTH=16384  # Linux/macOS
+
+# 方式二：通过 Modelfile 设置
+# 创建 Modelfile
+echo "FROM qwen2.5
+PARAMETER num_ctx 16384" > Modelfile
+
+# 创建自定义模型
+ollama create my-model -f Modelfile
+
+# 运行自定义模型
+ollama run my-model
+```
+
+> **⚠️ 注意**：Context Length 越大，占用的显存越多。普通 7B 模型建议 16384，14B 模型建议 8192。
+
+#### 6.3.4 在 AutoClip 中配置 Ollama
+
+1. 在 AutoClip 设置页面的 **API 配置** 标签页
+2. 在 AI 提供商下拉框中选择 **Ollama**
+3. 配置以下参数：
+
+| 参数 | 说明 | 填写值 |
+|------|------|--------|
+| API Key | Ollama 不验证 API Key | 任意值（如 `ollama`） |
+| 模型名称 | Ollama 中的模型名 | 例如 `qwen2.5` 或 `my-model` |
+| 基础URL | Ollama API 服务地址 | `http://localhost:11434/v1` |
+| 最大Token数 | 单次生成的最大输出长度 | `4096` |
+
+4. 点击 **测试连接** 确认成功
+5. 点击 **保存设置**
+
+### 6.4 本地模型配置检查清单
+
+使用本地 AI 模型时，请逐项确认：
+
+- [ ] LM Studio / Ollama 已安装并运行
+- [ ] 模型已下载并加载成功
+- [ ] Context Length 已设置为 16384 或更大（根据视频时长）
+- [ ] 修改 Context Length 后已重新加载模型（LM Studio）或重新创建模型（Ollama）
+- [ ] API 服务已启动（LM Studio 需手动点击 Start Server）
+- [ ] AutoClip 设置中的基础 URL 正确指向本地 API 地址
+- [ ] 测试连接成功
+
+### 6.5 常见错误及解决
+
+| 错误日志 | 原因 | 解决方案 |
+|---------|------|---------|
+| `n_keep: XXXX >= n_ctx: 4096` | Context Length 过小 | 增大至 16384+ 并重新加载模型 |
+| `Connection refused` | LM Studio / Ollama 未启动 | 检查 API 服务是否已运行 |
+| `model not found` | 模型名称不匹配 | 确认 LM Studio 或 Ollama 中已加载该模型 |
+| `Context size has been exceeded` | 输入文本超出模型窗口 | 增大 Context Length 或缩短视频 |
+
+---
+
+## 7. 故障排除
+
+### 7.1 常见问题
+
+#### 7.1.1 端口被占用
 
 **问题**: 启动服务时提示端口被占用
 
@@ -721,7 +907,7 @@ lsof -i :3000  # 前端端口
 kill -9 <PID>
 ```
 
-#### 6.1.2 Redis连接失败
+#### 7.1.2 Redis连接失败
 
 **问题**: Celery无法连接到Redis
 
@@ -736,7 +922,7 @@ brew services start redis  # macOS
 sudo systemctl start redis  # Linux
 ```
 
-#### 6.1.3 YouTube下载失败
+#### 7.1.3 YouTube下载失败
 
 **问题**: 无法下载YouTube视频
 
@@ -746,7 +932,7 @@ sudo systemctl start redis  # Linux
 3. 尝试使用浏览器Cookie
 4. 检查视频是否可用或需要登录
 
-#### 6.1.4 B站下载失败
+#### 7.1.4 B站下载失败
 
 **问题**: 无法下载B站视频
 
@@ -756,7 +942,7 @@ sudo systemctl start redis  # Linux
 3. 检查视频权限设置
 4. 尝试使用其他账号
 
-#### 6.1.5 AI处理速度慢
+#### 7.1.5 AI处理速度慢
 
 **问题**: AI分析处理时间过长
 
@@ -766,7 +952,7 @@ sudo systemctl start redis  # Linux
 3. 检查网络连接
 4. 考虑使用更快的AI模型
 
-#### 6.1.6 前端构建失败
+#### 7.1.6 前端构建失败
 
 **问题**: npm run build 失败
 
@@ -779,7 +965,7 @@ npm cache clean --force
 npm install
 ```
 
-#### 6.1.7 数据库连接失败
+#### 7.1.7 数据库连接失败
 
 **问题**: 无法连接到数据库
 
@@ -788,7 +974,7 @@ npm install
 2. 确认数据库权限设置
 3. 检查数据库连接字符串
 
-### 6.2 日志查看
+### 7.2 日志查看
 
 ```bash
 # 查看所有日志
@@ -800,7 +986,7 @@ tail -f logs/frontend.log   # 前端日志
 tail -f logs/celery.log     # 任务队列日志
 ```
 
-### 6.3 系统状态检查
+### 7.3 系统状态检查
 
 ```bash
 # 详细状态检查
@@ -814,9 +1000,9 @@ redis-cli ping                             # Redis连接测试
 
 ---
 
-## 7. 常见问题
+## 8. 常见问题
 
-### 7.1 安装和启动问题
+### 8.1 安装和启动问题
 
 **Q: 启动时提示端口被占用怎么办？**
 
@@ -855,7 +1041,7 @@ npm cache clean --force
 npm install
 ```
 
-### 7.2 功能使用问题
+### 8.2 功能使用问题
 
 **Q: YouTube视频下载失败怎么办？**
 
@@ -897,7 +1083,7 @@ npm install
 - 多语言字幕支持
 - 字幕格式转换
 
-### 7.3 性能优化
+### 8.3 性能优化
 
 **Q: 如何提高处理速度？**
 
